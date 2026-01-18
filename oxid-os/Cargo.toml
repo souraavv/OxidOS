@@ -1,0 +1,15 @@
+[package]
+name = "oxid-os"
+version = "0.1.0"
+edition = "2024"
+author = ["Sourav Sharma <souravsharma2468@gmail.com>"]
+
+# the profile used for `cargo build`
+[profile.dev]
+panic = "abort" # disable stack unwinding on panic
+
+# the profile used for `cargo build --release`
+[profile.release]
+panic = "abort" # disable stack unwinding on panic
+
+[dependencies]
