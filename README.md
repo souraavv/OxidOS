@@ -1,4 +1,5 @@
 
+- [Rust Setup](#rust-setup)
 - [Chapter 1. A Freestanding Rust Binary](#chapter-1-a-freestanding-rust-binary)
   - [The no\_std Attribute](#the-no_std-attribute)
   - [Panic Implementation](#panic-implementation)
@@ -7,7 +8,25 @@
   - [Name mangling](#name-mangling)
   - [C ABI](#c-abi)
   - [Linker Errors](#linker-errors)
+    - [Building for a Bare Metal Target](#building-for-a-bare-metal-target)
+  - [Making rust-analyzer happy](#making-rust-analyzer-happy)
 
+
+## Rust Setup 
+
+- On Mac
+
+```bash
+brew install rustup-init
+rustup-init -y
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# verify following shows some version 
+cargo --version
+rustc --version
+
+```
 
 ## Chapter 1. A Freestanding Rust Binary
 
@@ -114,6 +133,42 @@ trait Copy {}
     - As i explained earlier, this is required because the entry point is not called by any function, but invoked directly by the bootloader (or any other OS)
 
 ### Linker Errors
+- The linker is a program that combines the generated code into an executable
+- Since the executable format different b/w linux, Window and MacOS, each system has it own linker
+- The linker assumes our program depends on **C runtime**, which it doesn't
+- To solve the issue we need to tell the linker that it should not include the C runtime. We can do this mutiple ways
+
+#### Building for a Bare Metal Target
+- By default Rust tries to build an executable that is able to run in your current system environment
+- Rust uses a string called target triple shown in the output of `rustc --version --verbose` e.g., `host: x86_64-unknown-linux-gnu`
+  - CPU architecture (x86_64), the vendor (unknown), os (linux), ABI (gnu)
+- We will use `rustup target add thumbv7em-none-eabihf` 
+
+
+- We are building a platform, not a program. We need `nightly`. It contians feature which stable Rust doesn't ship. 
+- like unstable language features, unstable compiler flags, building the standard library yourself
+- Without this we can not build `core`, can not control runtime, 
+```bash
+rustup toolchain install nightly
+# set nightly as default
+rustup default nightly
+# rust-src, gives you source code for core, alloc, compile_builtins
+rustup component add rust-src llvm-tools-preview
+
+# thumbv7em-none-eabihf: says 'none' for the OS
+# Think none = bare metal; there is no kernel, no libc, no crt0. 
+# this is why linker stop pulling C runtime and why _start becomes 
+# our responsibility. So we are telling emit machine code for this CPU
+# do no assume any OS exists. I'm building the lowest layer.
+# e'abi'hf is the (ABI) . It defines how arguments are passed, stack 
+# layout, rules
+rustup target add thumbv7em-none-eabihf
+
+# -Z means: Use unstable compiler features.
+cargo build -Z build-std=core --target thumbv7em-none-eabihf
+```
+
+### Making rust-analyzer happy
 
 
 

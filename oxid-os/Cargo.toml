@@ -12,4 +12,10 @@ panic = "abort" # disable stack unwinding on panic
 [profile.release]
 panic = "abort" # disable stack unwinding on panic
 
+
+[[bin]]
+name = "oxid-os"
+test = false
+bench = false
+
 [dependencies]
