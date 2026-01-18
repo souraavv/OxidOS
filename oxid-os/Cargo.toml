@@ -13,6 +13,18 @@ panic = "abort" # disable stack unwinding on panic
 panic = "abort" # disable stack unwinding on panic
 
 
+# test dependends on std. The test harness defines its own
+# panic implementation. When you run cargo test, cargo doesn't run 
+# your program, instead it build a separate binary 
+# fn main() {
+#   // setup runtime
+#   // setup panic handling
+#   // discover all #[test] functions
+#   // run them
+#   // print results to stdout
+# }
+# This auto-generated binary is called the test harness. Our main is not used
+# not the panic handler and entry point (start)
 [[bin]]
 name = "oxid-os"
 test = false

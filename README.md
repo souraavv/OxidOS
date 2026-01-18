@@ -16,17 +16,17 @@
 
 - On Mac
 
-```bash
-brew install rustup-init
-rustup-init -y
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+    ```bash
+    brew install rustup-init
+    rustup-init -y
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+    source ~/.zshrc
 
-# verify following shows some version 
-cargo --version
-rustc --version
+    # verify following shows some version 
+    cargo --version
+    rustc --version
 
-```
+    ```
 
 ## Chapter 1. A Freestanding Rust Binary
 
@@ -38,8 +38,23 @@ rustc --version
 - Right now our crate implicitly links the standard library.
 - To disable it we will use `no_std` 
 
+    ```rust
+    #![no_std]
+    ```
+
 ### Panic Implementation
 - The standard library provides its own panic handler function, but in a no_std environment we need to define it ourselves:
+
+    ```rust
+    // core is effectively: the minimum implementation of the Rust language itself.
+    use core::panic::PanicInfo;
+
+    /// This function is called on panic.
+    #[panic_handler] 
+    fn panic(_info: &PanicInfo) -> ! {
+        loop {}
+    }
+    ```
 
 ### Concrete things compiler MUST decide
 
@@ -64,10 +79,11 @@ the compiler MUST choose between two very different machine behaviors:
 - but From where does a compiler get this "yes/no" from ?
     - We must define rules which compiler can read from a `trait` (interface) to figure out the let say the answer to `Copyable` question. It cannot guess. That pointers is `#[lang = "copy"]` in Rust
 
-```rust
-#[lang = "copy"]
-trait Copy {}
-```
+    ```rust
+    #[lang = "copy"]
+    trait Copy {}
+    ```
+
 - Any type implementing the `trait` means it follows the contract, and thus compiler can decide what instruction to inject. Thus this becomes a **mandatory** thing for the rust compiler. The default comes from the Rust standard library, which internally depends on `libc` present in the `/usr/lib`. This is the core library which implements the memory allocation functions, and a lot more. This also includes utilities which setups the syscalls (kernel functions are not normal function calls, so they can't be resolve by *linker*, instead architecture-specific language thunks are used to call into a kernel) 
 - Any good language rather than making these things hardcoded like for example `Copy`, it allows flexibility. the compiler search for all `#[lang = "copy"]` to make that decision. This allows flexibility
 - Ideally we should not provide custom implementation for language items (like `Copy`), it should only be done as last resort  (unless you are building a runtime / OS / core library.)
@@ -101,6 +117,17 @@ trait Copy {}
     - We will disable unwinding
         - The way we do this using `Cargo.toml`
 
+        ```bash
+        # the profile used for `cargo build`
+        [profile.dev]
+        panic = "abort" # disable stack unwinding on panic
+
+        # the profile used for `cargo build --release`
+        [profile.release]
+        panic = "abort" # disable stack unwinding on panic
+
+        ```
+
 ### What happens when you run a program ?
 - Runtime system: create stack, start a GC, zero global memory, setup TLS
 - In C, OS doesn't calls `main` it calls `_start`. 
@@ -124,6 +151,15 @@ trait Copy {}
 - We want the linker the name of the entry, thus we are using `#[unsafe(no_mangle)]`
 - You can name it anything, but this is the convention
 
+    ```rust
+    #[unsafe(no_mangle)] // don't mangle the name of this function
+    pub extern "C" fn _start() -> ! {
+        // this function is the entry point, since the linker 
+        // looks for a function named `_start` by default
+        loop {}
+    }
+    ```
+
 ### C ABI 
 - The OS understands a binary contract named as ABI (Application Binary Interface) and it understands only C ABI
 - Bootloaders like GRUB already follow this 
@@ -134,7 +170,7 @@ trait Copy {}
 
 ### Linker Errors
 - The linker is a program that combines the generated code into an executable
-- Since the executable format different b/w linux, Window and MacOS, each system has it own linker
+- Since the executable format different b/w linux, Window and MacOS, each system has it own linker [see this](https://github.com/souraavv/whitepapers-and-books/discussions/9#discussioncomment-15247589)
 - The linker assumes our program depends on **C runtime**, which it doesn't
 - To solve the issue we need to tell the linker that it should not include the C runtime. We can do this mutiple ways
 
@@ -148,27 +184,53 @@ trait Copy {}
 - We are building a platform, not a program. We need `nightly`. It contians feature which stable Rust doesn't ship. 
 - like unstable language features, unstable compiler flags, building the standard library yourself
 - Without this we can not build `core`, can not control runtime, 
-```bash
-rustup toolchain install nightly
-# set nightly as default
-rustup default nightly
-# rust-src, gives you source code for core, alloc, compile_builtins
-rustup component add rust-src llvm-tools-preview
 
-# thumbv7em-none-eabihf: says 'none' for the OS
-# Think none = bare metal; there is no kernel, no libc, no crt0. 
-# this is why linker stop pulling C runtime and why _start becomes 
-# our responsibility. So we are telling emit machine code for this CPU
-# do no assume any OS exists. I'm building the lowest layer.
-# e'abi'hf is the (ABI) . It defines how arguments are passed, stack 
-# layout, rules
-rustup target add thumbv7em-none-eabihf
+    ```bash
+    rustup toolchain install nightly
+    # set nightly as default
+    rustup default nightly
+    # rust-src, gives you source code for core, alloc, compile_builtins
+    rustup component add rust-src llvm-tools-preview
 
-# -Z means: Use unstable compiler features.
-cargo build -Z build-std=core --target thumbv7em-none-eabihf
-```
+    # thumbv7em-none-eabihf: says 'none' for the OS
+    # Think none = bare metal; there is no kernel, no libc, no crt0. 
+    # this is why linker stop pulling C runtime and why _start becomes 
+    # our responsibility. So we are telling emit machine code for this CPU
+    # do no assume any OS exists. I'm building the lowest layer.
+    # e'abi'hf is the (ABI) . It defines how arguments are passed, stack 
+    # layout, rules
+    rustup target add thumbv7em-none-eabihf
+
+    # -Z means: Use unstable compiler features.
+    cargo build -Z build-std=core --target thumbv7em-none-eabihf
+    ```
 
 ### Making rust-analyzer happy
+
+- Test dependends on std. 
+- The test harness defines its own panic implementation. 
+- When you run cargo test, cargo doesn't run your program, instead it build a separate binary 
+
+    ```rust
+    fn main() {
+    // setup runtime
+    // setup panic handling
+    // discover all #[test] functions
+    // run them
+    // print results to stdout
+    }
+    ```
+
+- This auto-generated binary is called the test harness. 
+- Our main is not usednot the panic handler and entry point (start)
+
+    ```bash 
+    [[bin]]
+    name = "oxid-os"
+    test = false
+    bench = false
+    ```
+
 
 
 
