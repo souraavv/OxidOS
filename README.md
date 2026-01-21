@@ -10,6 +10,12 @@
   - [Linker Errors](#linker-errors)
     - [Building for a Bare Metal Target](#building-for-a-bare-metal-target)
   - [Making rust-analyzer happy](#making-rust-analyzer-happy)
+- [Chapter 2. A Minimal Rust Kernel](#chapter-2-a-minimal-rust-kernel)
+  - [Boot Process](#boot-process)
+  - [Multiboot standard](#multiboot-standard)
+  - [UEFI](#uefi)
+  - [Minimal Kernel](#minimal-kernel)
+  - [Target Specification](#target-specification)
 
 
 ## Rust Setup 
@@ -231,6 +237,91 @@ the compiler MUST choose between two very different machine behaviors:
     bench = false
     ```
 
+## Chapter 2. A Minimal Rust Kernel
+
+### Boot Process
+- Two firmware: BIOS and UEFI
+  - UEFI is modern and has more feature than BIOS
+- BIOS Boot
+  - BIOS is loaded from specific flash memory located on the motherboard
+  - BIOS runs self-test and init the hardware (CPU, RAM)
+  - Then it looks for bootable disk
+  - If it finds, then it pass control to the bootloader
+  - Most bootloader are larger than 512 bytes, so bootloader are split into small stage, which fits into 512 bytes, and a second stage which loaded by the first stage
+  - The bootloader has to determine the location of the kernel image on the disk and load it into the memory
+  - It also needs to switch from 16-bit real mode first to 32 bit protected mode, and then to 64-bit long mode, where 64 bit register and main memory is accessible
+  - Its third job job is to query certain info such as memory map from the BIOS and pass it to the OS Kernel
+- Writing bootloader requires assembly language knowledge and therefore that is not covered in this
+
+### Multiboot standard
+- GNU GRUB is most popular bootloader on linux systems
+- To avoid every OS create a bootloader which is only compatible with single OS. FSS created an open boatloader standard called Mutliboot.
+- This standard defines an interface b/w the bootloader and os
+  - The reference implementation is GNU GRUB
+- To make a kernel Multiboot complaint, one just need to insert so-called Multiboot-header at the beginning of the kernel file 
+- This make it very easy to boot an OS from the GRUB
+- However GRUB and the multiboot standard have problems too 
+  - They support only 32-bit protected mode. This means that you still have to do CPU config to switch to the 64-bit long mode
+  - GRUB needs to be installed on the host system to create a bootable disk image from the kernel file. This makes development on Windows or Mac more difficult
+- We will not use GRUB or the multiboot standard for this project
+
+### UEFI
+- No support
+
+### Minimal Kernel
+- We built the freestanding binary through cargo, but depending on the operating system, we needed different entry point names and compile flags. 
+- That’s because cargo builds for the host system by default, i.e., the system you are running on
+- Instead, we want to compile for a clearly defined target system.
+- We need to setup Rust Nighly. This compiler allow us to opt-in various features. For example `asm!` macro for inline assembly by adding `#![feature(asm)]` to top of our `main.rs`
+
+
+### Target Specification
+- Cargo support different target system through `--target` parameter. The target described by so called target triple, which describe the CPU architecture, the vendor and OS
+  - e.g., `x86_64-unknown-linux-gnu`
+- For our target system, however, we require some special configuration parameters (e.g. no underlying OS)
+- Fortunately, Rust allows us to define our own target through a JSON file.
+- For example, a JSON file that describes the x86_64-unknown-linux-gnu target looks like this:
+    ```json
+    {
+        "llvm-target": "x86_64-unknown-linux-gnu",
+        "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        "arch": "x86_64",
+        "target-endian": "little",
+        "target-pointer-width": 64,
+        "target-c-int-width": 32,
+        "os": "linux",
+        "executables": true,
+        "linker-flavor": "gcc",
+        "pre-link-args": ["-m64"],
+        "morestack": false
+    }
+    ```
+- `data-layout` defines the size of various integer, floating point, and pointer type
+- Our target spec
+    ```json
+    {
+        "llvm-target": "x86_64-unknown-none",
+        "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        "arch": "x86_64",
+        "target-endian": "little",
+        "target-pointer-width": 64,
+        "target-c-int-width": 32,
+        "os": "none",
+        "executables": true,
+        "linker-flavor": "ld.lld",
+        "linker": "rust-lld",
+        "panic-strategy": "abort",
+        "disable-redzone": true,
+        "features": "-mmx,-sse,+soft-float",
+        "rustc-abi": "x86-softfloat"
+    }
+    ```
+
+- Instead of using the platform’s default linker, we use the cross-platform LLD linker that is shipped with Rust for linking our kernel (`"linker-flavor": "ld.lld"`)
+- `"panic-strategy": "abort"`: target doesn't support stack-unwinding on panic
+- We’re writing a kernel, so we’ll need to handle interrupts at some point. To do that safely, we have to disable a certain stack pointer optimization called the “red zone”, because it would cause stack corruption otherwise.
+- The `features` field enables/disables target features. We disable the `mmx` and `sse` features by prefixing them with a minus and enable the `soft-float` feature by prefixing it with a plus.
+  - 
 
 
 
