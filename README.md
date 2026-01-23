@@ -16,6 +16,12 @@
   - [UEFI](#uefi)
   - [Minimal Kernel](#minimal-kernel)
   - [Target Specification](#target-specification)
+  - [Memory-Related Intrinsics](#memory-related-intrinsics)
+  - [Set a default target](#set-a-default-target)
+  - [Printing to Screen](#printing-to-screen)
+  - [Unsafe Rust](#unsafe-rust)
+  - [Running our Kernel](#running-our-kernel)
+    - [Creating a Bootimage](#creating-a-bootimage)
 
 
 ## Rust Setup 
@@ -321,15 +327,98 @@ the compiler MUST choose between two very different machine behaviors:
 - `"panic-strategy": "abort"`: target doesn't support stack-unwinding on panic
 - We’re writing a kernel, so we’ll need to handle interrupts at some point. To do that safely, we have to disable a certain stack pointer optimization called the “red zone”, because it would cause stack corruption otherwise.
 - The `features` field enables/disables target features. We disable the `mmx` and `sse` features by prefixing them with a minus and enable the `soft-float` feature by prefixing it with a plus.
-  - 
 
+### Memory-Related Intrinsics
+- Rust compiler assumes that a certain set of built-in functions are available for all system
+- Most of the functions are provided by `compiler_builtins` crate that we just recompiled
+- However, there are some memory related function in the crate that are not enabled by default because they are normally provided by the C library on the system
+- These functions included `memset`, `memcpy`, `memcmp`. We might not need this function now at this point of project, but we can't also link to the C library of the OS, we need an alternative way provide these function to our compiler
+- It is dangerous to implement these on own, because even slighest mistake in the implementation can cause undefined behavior
+  - E.g., if you attempt to use `for` loop for `memcpy`, you might end up in infinite recursion, because `for` internally use `IntoIterator::into_iter`, which may call `memcpy`
+- Fortunaltely, the `compiler_builtins` crate already contains implementation for all the needed function, they are disabled by default to not collide with C library. We can enable them by setting cargo's `build-std-feature` flag
+- We will use `[unstable]` section for that or `-Z` option to the compiler
+    ```bash
+    [unstable]
+    build-std-feature = ["compiler-builtins-mem"]
+    build-std = ["core", "compiler_builtins"]
+    ```
+- Internally the effect is that the `#[unsafe(no_mangle)]` attribute is applied to the `memcpy`, **which makes them available for the linker**
+- So now we can write more complex code
 
+### Set a default target
 
+- To avoid passing `--target` param each time to the compiler let set that in .toml file
+    ```bash
+    [build]
+    target = "x86_64-blog_os.json"
+    ```
+- Now on we can use `cargo build` and that will use target defined in cargo.toml file as default 
 
+### Printing to Screen
+- Bootloader will call to our `_start` method (remember linker looks for this method by default as a convention), 
+- Let's add something to the screen output via our `_start` method
+- Easiest way to do this is using VGA text buffer
+- Its a special memory area mapped to the VGA hardware that contains the contents display on screen
+- It normally consist of 25 lines and 80 char each
+- Each character is display as ASCII
+- Let's print Hello world for now
+- The buffer is located at address `0xb8000` and that each character cell contains of an ASCII byte and a color byte 
+- We have to write to a raw pointer, thus we will use `unsafe` code block in Rust
+- We could create a VGA buffer type that encapsulates all unsafety and ensures that it is impossible to do anything wrong from the outside
+- We will create such a safe VGA buffer abstraction in the next chapter.
 
+### Unsafe Rust
+- You can take five actions in `unsafe` Rust that you can’t in safe Rust, which we call `unsafe` superpowers
+  - Dereference a raw pointer.
+  - Call an `unsafe` function or method.
+  - Access or modify a mutable static variable.
+  - Implement an `unsafe` trait.
+  - Access fields of unions.
+- It’s important to understand that `unsafe` doesn’t turn off the borrow checker or disable any of Rust’s other safety checks
+- The `unsafe` keyword only gives you access to these five features that are then not checked by the compiler for memory safety
+- Keep unsafe blocks small; you’ll be thankful later when you investigate memory bugs.
+  - You’ll know that any errors related to memory safety must be within an unsafe block
+- We always want to minimize the use of unsafe as much as possible
 
+### Running our Kernel
+- First we need to turn our compiled kernel into a bootable disk image by linking it **with** a bootloader
+- Then we can run the disk image in the QEMU virtual machine or boot it on real hardware using a USB stick
 
+#### Creating a Bootimage
+- As we have read earlier - Bootloader is reponsible for init the CPU and loading the kernel
+- Instead of writing our own bootloader, which is a project on its own, we use the bootloader crate
+- This crate implements a basic BIOS bootloader without any C dependencies, just Rust and inline assembly
+    ```bash
+    [dependencies]
+    bootloader = "0.9"
+    ```
+- Adding the bootloader as a dependency is not enough to actually create a bootable disk image. The problem is that we need to link our kernel with the bootloader after compilation, but cargo has no support for post-build scripts.
+- To solve this problem the author of original blog created a tool named `bootimage` - First compile the kernel and bootloader, and then links them together to create a bootable disk image
+- The bootimage tool performs the following steps behind the scenes:
+  - It compiles our kernel to an ELF file.
+  - It compiles the bootloader dependency as a standalone executable
+  - It links the bytes of the kernel ELF (Executable and Linkable format) file to the bootloader.
+    - Layout: ELF header, Program header table, .text, .rodata, .data, section header table
+- When booted, the bootloader reads and parses the appended ELF file
+- It then maps the program segments to virtual addresses in the page tables, zeroes the .bss section, and sets up a stack.
+- Finally, it reads the entry point address (our `_start` function) and jumps to it.
 
+- Install `qemu`
+  - `brew install qemu` on mac
+  - Now boot image using: `qemu-system-x86_64 -drive format=raw,file=target/x86_64-oxid_os/debug/bootimage-oxid-os.bin`
+
+- This is awesome - seeing your image getting boot up
+    ![alt text](./images/first-boot.png)
+
+- To avoid every time submit `qemu-system-x86_64` command. We can use target in config.toml file. 
+- The following Applies to all targets whose target configuration file’s "os" field is set to "none"
+    ```bash
+    [target.'cfg(target_os = "none")']
+    runner = "bootimage runner"
+    ```
+- This includes our x86_64-oxid_os.json target
+- The `runner` key specifies the command that should be invoked for `cargo run`
+- The command is run after a successful build with the executable path passed as the first argument
 
 
 
