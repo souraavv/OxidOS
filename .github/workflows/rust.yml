@@ -10,10 +10,6 @@ jobs:
   build-and-boot:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: oxid-os
-
     steps:
       - uses: actions/checkout@v4
 
@@ -34,10 +30,7 @@ jobs:
         run: cargo install bootimage
 
       - name: Build kernel
-        run: cargo build
+        run: cargo build --manifest-path oxid-os/Cargo.toml
 
-      - name: Boot kernel in QEMU (headless - forced)
-        run: |
-          timeout 120 bootimage runner \
-            --config Bootimage.toml \
-            target/x86_64-oxid_os/debug/oxid-os
+      - name: Boot kernel in QEMU (headless)
+        run: timeout 180 cargo run --manifest-path oxid-os/Cargo.toml
