@@ -36,5 +36,8 @@ jobs:
       - name: Build kernel
         run: cargo build
 
-      - name: Boot kernel in QEMU (headless)
-        run: timeout 300 cargo run
+      - name: Boot kernel in QEMU (headless - forced)
+        run: |
+          timeout 120 bootimage runner \
+            --config Bootimage.toml \
+            target/x86_64-oxid_os/debug/oxid-os
