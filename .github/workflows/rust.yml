@@ -17,30 +17,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install system dependency (QEMU)
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
 
-      # Install nightly Rust
       - name: Install nightly Rust
         run: |
           rustup toolchain install nightly
           rustup default nightly
 
-      # Install required Rust components
       - name: Install rust-src and llvm-tools
         run: |
           rustup component add rust-src --toolchain nightly
           rustup component add llvm-tools-preview --toolchain nightly
 
-      # Install bootimage tool
       - name: Install bootimage
         run: cargo install bootimage
 
-      # Build kernel
       - name: Build kernel
         run: cargo build
 
-      # Boot kernel (via cargo run)
-      - name: Boot kernel in QEMU
-        run: cargo run
+      - name: Boot kernel in QEMU (headless)
+        run: timeout 10 cargo run
