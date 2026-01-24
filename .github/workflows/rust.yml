@@ -1,13 +1,10 @@
-name: Rust
+name: OxidOS CI
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   build:
@@ -20,8 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Install nightly Rust
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
 
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Install rust-src
+        run: rustup component add rust-src --toolchain nightly
+
+      - name: Build kernel
+        run: cargo build -Z build-std=core,alloc,compiler_builtins --target x86_64-oxid_os.json
