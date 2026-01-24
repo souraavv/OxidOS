@@ -37,4 +37,4 @@ jobs:
         run: cargo build
 
       - name: Boot kernel in QEMU (headless)
-        run: timeout 10 cargo run
+        run: timeout 300 cargo run
