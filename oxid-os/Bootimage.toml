@@ -1,0 +1,9 @@
+[run]
+command = ["qemu-system-x86_64"]
+
+args = [
+    "-drive", "format=raw,file={}",
+    "-nographic",
+    "-serial", "stdio"
+    "-no-reboot"
+]
