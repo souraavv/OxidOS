@@ -26,11 +26,15 @@ jobs:
           rustup component add rust-src --toolchain nightly
           rustup component add llvm-tools-preview --toolchain nightly
 
+      - name: Build kernel
+        run: cargo build \
+             --manifest-path oxid-os/Cargo.toml \
+             --config oxid-os/.cargo/config.toml
+
       - name: Install bootimage
         run: cargo install bootimage
-
-      - name: Build kernel
-        run: cargo build --manifest-path oxid-os/Cargo.toml
-
-      - name: Boot kernel in QEMU (headless)
-        run: timeout 180 cargo run --manifest-path oxid-os/Cargo.toml
+        
+      - name: Boot kernel
+        run: timeout 120 cargo run \
+             --manifest-path oxid-os/Cargo.toml \
+             --config oxid-os/.cargo/config.toml
