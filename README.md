@@ -22,6 +22,10 @@
   - [Unsafe Rust](#unsafe-rust)
   - [Running our Kernel](#running-our-kernel)
     - [Creating a Bootimage](#creating-a-bootimage)
+- [Chapter 3. VGA Text Mode](#chapter-3-vga-text-mode)
+  - [A Rust Module](#a-rust-module)
+    - [Colors](#colors)
+    - [Text Buffer](#text-buffer)
 
 
 ## Rust Setup 
@@ -421,4 +425,96 @@ the compiler MUST choose between two very different machine behaviors:
 - The command is run after a successful build with the executable path passed as the first argument
 
 
+## Chapter 3. VGA Text Mode 
 
+- VGA text mode is simple way to print text to the screen 
+- To print character to the screen in VGA text mode, one has to write it to the text buffer of VGA hardware
+- VGA text buffer is an array of size 25 rows and 80 columns
+- Each entry in this array represents a single character
+  - The first byte in represent the character that should be printed in the ASCII encoding
+  - The second byte defines how the character is displayed
+    - The first four bit defines the foreground
+      - Bit 4 is the bright bit
+    - The next three bits the background color
+    - Last - whether character should blink or not 
+- The VGA text buffer is accessible via the memory-mapped I/O to the address `0xb8000`
+- This means the read and write to that address don't access the RAM but directly access the text buffer on the VGA hardware. 
+  - This means we can read and write through normal memory operation to that address
+  - Note that memory-mapped hardware might not support all normal RAM operations
+- In this chapter we will encapsulate all the unsafety in a special module
+
+### A Rust Module
+- We can now create a Rust module to handle printing:
+    ```rust
+    // in src/main.rs
+    mod vga_buffer;
+    ```
+- For the content of this module we will create a new `src/vga_buffer.rs` file.
+
+#### Colors
+
+```rust
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Color {
+    Black = 0,
+    Blue = 1,
+    Green = 2,
+    Cyan = 3,
+    Red = 4,
+    Magenta = 5,
+    Brown = 6,
+    LightGray = 7,
+    DarkGray = 8,
+    LightBlue = 9,
+    LightGreen = 10,
+    LightCyan = 11,
+    LightRed = 12,
+    Pink = 13,
+    Yellow = 14,
+    White = 15,
+}
+```
+
+- `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` is like asking the compiler to automatically implements traits for your Type
+  - `Debug` is used : `println!("{:?}", color)`
+  - `Clone`: `let b = a.clone()`
+  - `Copy`: Stronger that copy `let b = a`; no ownership transfer, no destructor, no heap
+    - If a type is `Copy`, Rust also required it to be `Clone`
+  - `PartialEq` Allows `a == b` or `a != b`
+  - `Eq` (total and reflexive)
+
+#### Text Buffer
+
+- ScreenChar and Buffer
+    ```rust
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(C)]
+    struct ScreenChar {
+        ascii_character: u8,
+        color_code: Colorcode,
+    }
+
+    const BUFFER_HEIGHT = 25;
+    const BUFFER_WIDTH = 80;
+
+    #[repr(transparent)]
+    struct Buffer {
+        char: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
+    }
+
+    ```
+
+- Writer
+    ```rust
+    pub struct Writer {
+        column_position: usize,
+        color_code: ColorCode,
+        buffer: &'static mut Buffer,
+    }
+    ```
+
+- The writer will always write to the last line and shift line up when filled
+- The `'static` lifetime specifies that the reference is valid for the whole program run time
