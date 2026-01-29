@@ -26,6 +26,7 @@
   - [A Rust Module](#a-rust-module)
     - [Colors](#colors)
     - [Text Buffer](#text-buffer)
+    - [Printing](#printing)
 
 
 ## Rust Setup 
@@ -518,3 +519,87 @@ pub enum Color {
 
 - The writer will always write to the last line and shift line up when filled
 - The `'static` lifetime specifies that the reference is valid for the whole program run time
+
+#### Printing
+- Now we can use the `Writer` to modify the buffer characters. First we create a method to writea single ASCII byte
+    ```rust
+    impl Writer {
+        pub fn write_byte(&mut self, byte: u8) {
+            match byte {
+                b'\n' => self.new_line(),
+                byte => {
+                    if self.column_position >= BUFFER_WIDTH {
+                        self.new_line();
+                    }
+
+                    let row = BUFFER_HEIGHT - 1;
+                    let col = self.column_position;
+
+                    let color_code = self.color_code;
+                    self.buffer.chars[row][col] = ScreenChar {
+                        ascii_character: byte,
+                        color_code,
+                    };
+
+                    self.column_position += 1;
+                }
+            }
+        }
+
+        fn new_line(&mut self) {
+            /* TODO */
+        }
+    }
+    ```
+
+- To print whole string, we can convert them to bytes and print them one-by-one
+    ```rust
+    impl Writer {
+        pub fn write_string(&mut self, s: &str) {
+            for byte in s.bytes() {
+                match byte {
+                    0x20..=0x7e | b'\n' => self.write_byte(byte),
+                    _ => self.write_byte(0xfe),
+                }
+            }
+        }
+    }
+    ```
+- The VGA text buffer only supports ASCII 
+- For unprintable we are using `0xfe` 
+    ```rust
+    pub fn print_something() {
+        let mut writer = Writer {
+            column_position: 0, 
+            color_code: ColorCode::new(Color:Yellow, Color::Black),
+            buffer: unsafe {&mut *(0xb8000 as *mut Buffer)},
+        }
+
+        writer.write_byte(b'H');
+        writer.write_string("ello ");
+    }
+    ```
+
+- Brush up (can skip if already familiar)
+  - Note `0xb8000` by its own is just a number (hex literal)
+  - `0xb8000 as *mut Buffer`: cast number to a Raw Pointer to the `Buffer`
+    - in terms of CPP this is same as `Buffer*`
+  - The leading `*` in `*(0xb8000 as *mut Buffer)` is dereference
+    - Go to the memory located at that address, and treat it as Buffer value
+    - This is first dangerous operation - as we are asking CPU to load memory from address `0xb8000`
+    - This is where - page fault can happen
+    - That's why we required `unsafe` 
+    - At this point the Type is `Buffer`
+  - The final `&mut *(...)`  
+    - `&mut X` : create an exclusive, non-null, aligned, borrow-checked reference to X
+- `*` goes from pointer to memory
+- `&mut` goes from memory to reference
+- `&mut (0xb8000 as *mut Buffer)`: This expression without `*` will give you a pointer to a pointer
+  - `0xb8000 as *mut Buffer` is a pointer value
+  - `&mut` would give you `&mut *mut Buffer` (a pointer to a pointer)
+  - not a `&mut Buffer` 
+- CPP equivalent
+    ```cpp
+    Buffer* ptr = reinterpret_cast<Buffer*>(0xb8000);
+    Buffer& ref = *ptr;
+    ```
