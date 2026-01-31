@@ -605,3 +605,5 @@ pub enum Color {
     Buffer* ptr = reinterpret_cast<Buffer*>(0xb8000);
     Buffer& ref = *ptr;
     ```
+
+![Again](/images/colors.png)
