@@ -29,6 +29,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86
 
-      - name: Build and Run (Headless)
-        run: timeout 25 cargo bootimage --target x86_64-oxid_os.json
+      - name: Build boot image
+        run: cargo bootimage --target x86_64-oxid_os.json
 
+      - name: Run QEMU and verify boot
+        run: |
+          timeout 15 qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-oxid_os/debug/bootimage-oxid-os.bin \
+            -nographic \
+            -serial stdio \
+            -no-reboot > output.log 2>&1 || true
+
+          echo "===== QEMU OUTPUT ====="
+          cat output.log
+
+          grep "OXIDOS_BOOT_OK" output.log
