@@ -16,7 +16,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust nightly with required components
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src, llvm-tools-preview
@@ -29,9 +29,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86
 
-      - name: Build bootable image
-        run: cargo bootimage --target x86_64-oxid_os.json
-
-      - name: Run in QEMU (headless, auto-exit)
+      - name: Build and Run (Headless)
         run: |
-          timeout 5 cargo run --target x86_64-oxid_os.json
+          timeout 25 cargo bootimage --target x86_64-oxid_os.json --run
