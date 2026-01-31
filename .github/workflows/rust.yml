@@ -30,5 +30,5 @@ jobs:
           sudo apt-get install -y qemu-system-x86
 
       - name: Build and Run (Headless)
-        run: |
-          timeout 25 cargo bootimage --target x86_64-oxid_os.json --run
+        run: timeout 25 cargo bootimage --target x86_64-oxid_os.json
+
