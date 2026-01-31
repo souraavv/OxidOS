@@ -575,6 +575,8 @@ pub enum Color {
             buffer: unsafe {&mut *(0xb8000 as *mut Buffer)},
         }
 
+        // The b' prefix creates a byte literal
+        // which represents an ASCII character
         writer.write_byte(b'H');
         writer.write_string("ello ");
     }
