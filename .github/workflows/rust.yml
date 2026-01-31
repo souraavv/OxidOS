@@ -13,22 +13,25 @@ jobs:
         working-directory: oxid-os
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust nightly
+      - name: Install Rust nightly with required components
         uses: dtolnay/rust-toolchain@nightly
         with:
-          components: llvm-tools-preview
+          components: rust-src, llvm-tools-preview
 
       - name: Install bootimage
         run: cargo install bootimage
 
-      - name: Add custom target
-        run: rustup target add x86_64-unknown-none
-
       - name: Install QEMU
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
 
-      - name: Build
+      - name: Build bootable image
         run: cargo bootimage --target x86_64-oxid_os.json
+
+      - name: Run in QEMU (headless, auto-exit)
+        run: |
+          timeout 5 cargo run --target x86_64-oxid_os.json
