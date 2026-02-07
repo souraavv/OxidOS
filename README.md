@@ -27,6 +27,13 @@
     - [Colors](#colors)
     - [Text Buffer](#text-buffer)
     - [Printing](#printing)
+  - [Formating Macros](#formating-macros)
+  - [NewLine](#newline)
+  - [A Global Interface](#a-global-interface)
+    - [Lazy Statics](#lazy-statics)
+    - [SpinLocks](#spinlocks)
+    - [Safety](#safety)
+    - [A println Macro](#a-println-macro)
 
 
 ## Rust Setup 
@@ -585,17 +592,20 @@ pub enum Color {
 - Brush up (can skip if already familiar)
   - Note `0xb8000` by its own is just a number (hex literal)
   - `0xb8000 as *mut Buffer`: cast number to a Raw Pointer to the `Buffer`
-    - in terms of CPP this is same as `Buffer*`
+    - in terms of CPP this is same as `Buffer* ptr = (Buffer*) 0xb8000`
   - The leading `*` in `*(0xb8000 as *mut Buffer)` is dereference
     - Go to the memory located at that address, and treat it as Buffer value
     - This is first dangerous operation - as we are asking CPU to load memory from address `0xb8000`
-    - This is where - page fault can happen
-    - That's why we required `unsafe` 
+    - The reason we added `unsafe` to by pass compiler checks. Rust cannot verify
+      - Does memory exists?
+      - Is it actually a `Buffer`?
+      - Is there another mutable reference already ? (race conditions)
+      - Is the memory init ?
     - At this point the Type is `Buffer`
   - The final `&mut *(...)`  
     - `&mut X` : create an exclusive, non-null, aligned, borrow-checked reference to X
 - `*` goes from pointer to memory
-- `&mut` goes from memory to reference
+- `&mut` goes from memory to reference. Rust need to know if it is mutable reference of defautl (immutable)
 - `&mut (0xb8000 as *mut Buffer)`: This expression without `*` will give you a pointer to a pointer
   - `0xb8000 as *mut Buffer` is a pointer value
   - `&mut` would give you `&mut *mut Buffer` (a pointer to a pointer)
@@ -607,3 +617,218 @@ pub enum Color {
     ```
 
 ![Again](/images/colors.png)
+
+
+### Formating Macros 
+
+- We will start using Rust Formatting macros, so that we can easily print different types, like integer or floats
+- To support them we need to implement `core::fmt::Write` trait
+- The only requirement of this trait is `write_str` and return type is `fmt::Result`
+    ```rust
+    use core::fmt;
+
+    impl fmt::Write for Writer {
+        fn write_str(&mut self, s: &str) -> {
+            self.write_string(s);
+            Ok(())
+        }
+    }
+
+    ```
+- The `Ok(())` is just `Ok` `Result` containing `()` type
+  - In Rust `()` is equivalent to `void` in CPP. This is called unit type. This means there is a value here, but it carries no information 
+- Now we can use Rust's built-in `write!` or `writeln!` formatting macros:
+
+```rust
+pub fn print_something() {
+    use core::fmt::Write;
+
+    let mut writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+    }
+
+    writer.write_byte(b'H');
+    writer.write_string("ello! ");
+    write!(writer, "The number are {} and {}", 42, 1.0/3.0).unwrap();
+}
+```
+
+- `unwrap()` means if it `Ok()`, give me a value. If it's `Err`, then panic
+  - This isn’t a problem in our case, since writes to the VGA buffer never fail.
+
+### NewLine
+
+```rust
+impl Writer {
+    fn new_line(&mut self) {
+        for row in 1..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
+                let character = self.buffer.chars[row][col].read();
+                // Move character one line up i.e., row - 1
+                self.buffer.chars[row - 1][col].write(character);
+            }
+        }
+        self.clear_row(BUFFER_HEIGHT - 1);
+        self.column_position = 0;
+    }
+
+    // This method clears a row by overwriting all of its characters 
+    // with a space character.
+    fn clear_row(&mut self, row: usize) {
+        let blank = ScreenChar {
+            ascii_character: b' ',
+            color_code: self.color_code,
+        };
+
+        for col in 0..BUFFER_WIDTH {
+            self.buffer.chars[row][col].write(blank);
+        }
+    }
+}
+
+```
+
+
+### A Global Interface
+- To provide a global writer that can be used as an interface from other module without carrying a `Writer` instance around, we try to create a `static WRITER`
+
+    ```rust
+    pub static WRITER: Writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer)},
+    };
+    ```
+
+- The above will fail - because statics are init at compile time
+- Rust compiler evaluates such initialization expression is called "const evaluator"
+- Problem here is that Rust’s const evaluator is not able to convert raw pointers to references at compile time. 
+
+#### Lazy Statics
+- The one-time initialization of statics with non-const functions is a common problem in Rust.
+- This crate provides a lazy_static! macro that defines a lazily initialized static
+- Instead of computing its value at compile time, the static lazily initializes itself when accessed for the first time. 
+
+    ```toml
+    [dependencies.lazy_statics]
+    version = "1.0"
+    features = ["spin_no_std"]
+    ```
+- We need the `spin_no_std` feature, since we don’t link the standard library.
+- With lazy_static, we can define our static WRITER without problems:
+
+```rust
+use lazy_static::lazy_static;
+
+lazy_static! {
+    pub static ref WRITER: Writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer)},
+    }
+}
+```
+- However above `WRITER` is purely useless, becuase this is immutable
+- This means we can not write anything. Since all write methods take `&mut self`
+- One solution would be to use `mutable static` 
+- But then every write to this would be unsafe since 
+  - Using `static mut` is highly discouraged
+- What we can do ?
+  - Can we use an immutable static with a cell type like `RefCell` or even `UnsafeCell` that provides interior mutability
+  - But problem is these types are not `Sync`, so we can't use them in static
+
+#### SpinLocks
+- To get synchronized interior mutability, users of a standard library can use `Mutex`. 
+- It provides mutual exclusion, but our kernel doesn't have that
+- However there is a really basic type of mutex in computer science that requires no operating system features: the spinlock.
+- Instead of blocking the thread simply try to lock it again and again in tight loop, thus burning CPU time until the mutex is free again
+- To use spinlock mutex, we can add the spin crate as a dependency
+
+    ```toml
+    [dependencies]
+    spin = "0.5.2"
+    ```
+
+- Using spin mutex
+
+    ```rust
+    // in src/vga_buffer.rs
+    using spin::Mutex;
+
+    lazy_static {
+        pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
+            column_position: 0,
+            color_code:ColorCode::new(Color::Yellow, Color::Black),
+            writer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        });
+    }
+    ```
+- Now we can delete `print_something` function and use directly
+
+    ```rust
+    // in src/main.rs
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _start() -> ! {
+        use core::fmt::Writer;
+        vga_buffer::WRITER.lock().write_str("hello again").unwrap();
+        write!(vga_buffer::WRITER.lock(), ", some number: {} {}", 42, 1.37)
+                .unwrap();
+        loop {}
+    }
+    ```
+
+#### Safety 
+
+#### A println Macro
+- Now that we have global writer, we can add a `println` macro that can be used from anywhere 
+- Rust macro syntax is bit strange (we will copy for now directly from source code of Rust)
+
+    ```rust
+    #[macro_export]
+    macro_rules! print {
+        ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+    }
+
+    #[macro_export]
+    macro_rules! println {
+        () => ($crate::print!("\n"));
+        ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+    }
+
+
+    // Locks our static WRITR and calls write_fmt method on it
+    // This method is from Writer trait, which we need to import 
+    // function is public - macros need to be called outside the module
+    //private doc - internal detail
+    #[doc(hidden)]
+    pub fn _print(args: fmt::Argument) {
+        // Implementing a trait does NOT automatically bring its methods 
+        // into scope.
+        use core::fmt::Write;
+        WRITER.lock().write_fmt(args).unwrap();
+    }
+    ```
+
+- Like in the standard library, we add the `#[macro_export]` attribute to both macros to make them available everywhere in our crate.
+- When you use  `#[macro_export]` Rust Moves the macro to the crate root. Not inside the module namespace
+  - It get place in the crate root namespace `crate::print!`
+  - Makes them available every where in our crate
+  - so even when this is defined in `src/vga_buffer.rs` 
+  - It become available as `crate::println!` and not `crate::vga_buffer::println!`
+- Why did we use `$crate:print!` instead of `print!`
+  - `$crate` is a special macro variable. It expands to: current crate root path
+  - This is like preventing the name resolution issue, if other crate too have `print!` defined
+
+- With all this in place, now we can write
+
+    ```rust
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _start() -> ! {
+        println!("Hello World{}", "!")
+
+        loop {}
+    }
+    ```
