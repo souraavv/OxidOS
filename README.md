@@ -6,7 +6,7 @@
   - [Concrete things compiler MUST decide](#concrete-things-compiler-must-decide)
   - [What happens when you run a program ?](#what-happens-when-you-run-a-program-)
   - [Name mangling](#name-mangling)
-  - [C ABI](#c-abi)
+  - [C ABI (Application Binary Interface)](#c-abi-application-binary-interface)
   - [Linker Errors](#linker-errors)
     - [Building for a Bare Metal Target](#building-for-a-bare-metal-target)
   - [Making rust-analyzer happy](#making-rust-analyzer-happy)
@@ -184,12 +184,28 @@ the compiler MUST choose between two very different machine behaviors:
     }
     ```
 
-### C ABI 
-- The OS understands a binary contract named as ABI (Application Binary Interface) and it understands only C ABI
+### C ABI (Application Binary Interface)
+- In a normal Rust program `main()` is called by Rust's runtime. But in OS kernel, there is no runtime. 
+- The bootloader loads your kernel into the memory and then jump to a specified symbol in the binary symbol table
+  - By convention that symbol is `_start` (a well known symbol)
+- Why using `extern "C"`?
+  - This is about calling convention ABI 
+  - A machine level rule for how functions are called
+  - This includes
+    - Which register hold arguments
+    - Who cleans the stack
+    - How return values are passed
+  - The bootloader expects C-style calling convention
+  - Using `extern "C"` acts as a contract
+    - Now bootloader and your function agrees on 
+      - Stack Layout
+      - Register usage
+      - Calling convention
+- Note this method never return, because if it do then everything gone, so we write kernel never exists `loop {}`
 - Bootloaders like GRUB already follow this 
     - So order is : Hardware -> Bootloader (often written for C ABI) -> your `_start` -> your kernel code 
 - ABI is machine-level agreement about how code  humps into one other 
-- Marking `extern "C"` to tell the compiler that **it should use the C calling convention for this function** (instead of unspecified Rust calling convention) 
+- Marking `extern "C"` to tell the compiler that **it should use the C calling convention for this function** (instead of **unspecified** Rust calling convention which booloader doens't understands) 
     - As i explained earlier, this is required because the entry point is not called by any function, but invoked directly by the bootloader (or any other OS)
 
 ### Linker Errors
