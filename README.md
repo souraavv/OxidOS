@@ -34,6 +34,12 @@
     - [SpinLocks](#spinlocks)
     - [Safety](#safety)
     - [A println Macro](#a-println-macro)
+- [Chapter 4. Testing](#chapter-4-testing)
+  - [Testing in Rust](#testing-in-rust)
+  - [Custom Test Framework](#custom-test-framework)
+  - [Existing QEMU](#existing-qemu)
+  - [I/O Ports](#io-ports)
+  - [Using Exit Device](#using-exit-device)
 
 
 ## Rust Setup 
@@ -948,3 +954,191 @@ lazy_static! {
         loop {}
     }
     ```
+
+## Chapter 4. Testing
+- Unit and integration test in `no_std` executables
+- We will use Rust's support for custom test framework to execute test functions inside our kernel. 
+- To report the result out of QEMU, we will use different feature of QEMU and `bootimage` tool
+
+### Testing in Rust
+- Rust has built-in test framework - so there is no need to setup anything
+  - Using `#[test]`. The `cargo test` will automatically find and execute all the test of your crate
+    ```toml
+    [[bin]]
+    test = true
+    ```
+- The `[[bin]]` section defines how `cargo` should compiler our `oxid_os` executables
+  - We initially set `test = false` to make `rust-analyzer` happy, but now we want to enable testing
+- Unfortunately testing is complex for `no_std` application 
+  - The problem is Rust's test framework uses built-in `test` library which relies on `std` library
+
+### Custom Test Framework
+- Fortunately, rust supports replacing the default test framework through the unstable `custom_test_framework` feature
+- This feature require no external libraries and thus also work in `#[no_std]` environment
+  - It works by calling user specified runner function annotated with `[test_case]`
+- But it lacks lot of features like `should_panic` testcase
+- To implement a custom test framework for our kernel, we add the following to `main.rs`
+
+    ```rust
+    #![feature(custom_test_framework)]
+    #![test_runner(crate::test_runner)]
+
+    #[cfg(test)]
+    pub fn test_runner(tests: &[&dyn Fn()]) {
+        println!("Running {} test", tests.len());
+        for test in tests {
+            test();
+        }
+    }
+    ```
+- More details
+  - `Fn()` is a trait, not a type
+    ```rust
+    pub trait Fn<Args>: FnMut<Args> where Args: Tuple, {
+        extern "rust-call" fn call(&self, args: Args) -> Self::Output;
+    }
+
+    // Examples
+    // Calling a closure
+    let square = |x| x * x;
+    assert_eq!(square(5), 25)
+
+    // Using a Fn parameter
+
+    fn call_with_one<F>(func: F) -> usize where F: Fn(usize) -> usize {
+        func(1)
+    }
+
+    let double = |x| x * 2;
+    assert_eq!(call_with_one(double), 2);
+
+    ```
+  - Something which can be call like function but with no args and no return value
+  - We used `dyn Fn()` means a trait object implementing `Fn()`, chosen at runtime
+    - Rust requires you to be explicit when you want runtime polymorphism 
+  - Trait objects are unsized (they are not concrete type, they are just behavior contracts), so you must put them behind `&` a pointer
+    - `&dyn Fn()`, `Box<dyn Fn()>`, `Arc<dyn Fn()>`
+    - Ex.
+    ```rust
+    trait Speak {
+        fn speak(&self);
+    }
+
+    struct Dog;
+    struct Cat { age: u32 }
+    struct Bird { a: u64, b: u64}
+
+    // All of these can implement Speak
+
+    ```
+    - So what does `dyn Speak` - some unknown concrete type implementing `Speak`
+      - So unknown type == unknown size
+  - The outer `&[]` is a borrowed slice 
+    - Inside each element is a reference to a dynamically dispatched callable 
+
+- 
+-
+- There is some known bug in cargo that leads to `duplicate lang item in crate core:` when we try to write unit test case when we have disabled `std` crate
+    ```toml
+    panic-abort-tests = true
+    ```
+
+```rust
+
+//sets the name of the entry point
+#![reexport_test_harness_main = "test_main"] 
+
+pub extern "C" fn _start() -> ! {
+    // ...
+    #[cfg(test)]
+    test_main();
+    // ...
+    loop {}
+}
+
+
+#[cfg(test)]
+pub fn test_runner(tests: &[&dyn Fn()]) {
+    println!("Running {} tests", tests.len());
+    for test in tests {
+        test();
+    }
+}
+
+#[test_case]
+fn trivial_assertion() {
+    println!("trivial assertion");
+    assert_eq!(1, 1);
+    println!("[ok]")
+}
+```
+
+[First test case](./images/first-test-case.png)
+
+
+### Existing QEMU
+- Right now we have endless loop `loop {}`
+- The clean sol is to implement a proper way to shutdown our OS
+  - Unfortunately this is relatively complex because it requires implementing support for either APM or ACPI power management standards
+- Luckily there is a escape hatch: QEMU support special `isa-debug-exit` device, which provides an easy way to exit QEMU from the guest systems
+- To enable it we need to pass a device argument to the QEMU
+- We can do so by adding a `package.metadata.bootimage.test-args` in our Cargo.toml
+    ```toml
+    # in Cargo.toml
+
+    [package.metadata.bootimage]
+    test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+    ```
+- The `bootimage` runner will append the `test-args` to the default QEMU command for all test executables
+  - For a normal `cargo run` this is ingored
+- Together with the device name `isa-debug-exit` we also pass parameters
+  - `iobase`
+  - `iosize` 
+  - These specify the IO port through which the device is reachable from our kernel
+
+### I/O Ports
+- There are different way of communicating b/w CPU and peripheral hardware on `x86_64`
+  - Memory Mapped IO
+  - Port Mapped IO
+- We already using Memory mapped IO for accessing VGA text buffer through memory address `0xb8000`
+- This address is not mapped to RAM but to some memory on VGA device
+- In contract, port Mapped IP uses a separate IO bus for communication
+  - Each connected peripheral has one or more port numbers
+  - To communicate with such an I/O port, there are special CPU instruction called `in` and `out`, which takes out port number and data bytes
+- The `isa-exit-debug` device uses port-mapped I/O
+- The `iobase` parameter specifies on which port address the device should live (`0xf4` is generally unused port on x86 I/O bus)
+  - and `iosize` specifies the port size (`0x04` means 4 bytes)
+
+### Using Exit Device
+- The functionaliy of `isa-debug-exit` is very simple
+- when a value is written to I/O port specified by `iobase`, it causes QEMU to exit with exit status `(value << 1) | 1`
+- So when we write `0` to the port, QEMU will exit with exit status `1`and when we write `1` then `3`
+- Instead manually invoking `in` and `out` assembly instructions we use abstraction provided by `x86_64` crate
+- Now we can use `Port` type provided by the crate to create `exit_qemu` function
+    ```rust
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u32)] // 4 bytes
+    pub enum QemuExitCode {
+        // To specify the exit status
+        Success = 0x10, // we use a number which doesn't clash with QEMU's exit code like 0, or 1
+        Failed = 0x11,
+    }
+
+    pub fn exit_qemu(exit_code: QemuExitCode) {
+        use x86_64::instructions::port::Port;
+
+        // unsafe because writing to a port can have unspecified behavior
+        unsafe {
+            let mut port = Port::new(0xf4);
+            port.write(exit_code as u32);
+        }
+    }
+    ```
+
+    ```rust
+    test_main();
+    exit_qemu(QemuExitCode::Success);
+    ```
+
+
+
