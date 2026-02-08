@@ -42,6 +42,8 @@
   - [Using Exit Device](#using-exit-device)
   - [Printing to the Console](#printing-to-the-console)
     - [Serial Port](#serial-port)
+    - [Print an Error Message on Panic](#print-an-error-message-on-panic)
+  - [Hiding QEMU](#hiding-qemu)
 
 
 ## Rust Setup 
@@ -1244,3 +1246,41 @@ lazy_static! {
         serial_println!("[ok]");
     }
     ```
+
+#### Print an Error Message on Panic
+- To exit QEMU with an error message on a panic, we can use conditional compilation to use a different panic handler in testing mode:
+    ```rust
+    // our existing panic handler
+    #[cfg(not(test))] // new attribute
+    #[panic_handler]
+    fn panic(info: &PanicInfo) -> ! {
+        println!("{}", info);
+        loop {}
+    }
+    ```
+    ```rust
+    // our panic handler in test mode
+    #[cfg(test)]
+    #[panic_handler]
+    fn panic(info: &PanicInfo) -> ! {
+        serial_println!("[failed]\n");
+        serial_println!("Error: {}\n", info);
+        exit_qemu(QemuExitCode::Failed);
+        loop {}
+    }
+    ```
+- Note that we still need an endless loop after the `exit_qemu` call because the compiler does not know that the `isa-debug-exit` device causes a program exit.
+
+
+### Hiding QEMU
+- Since we report out the complete test results using the `isa-debug-exit` device and the serial port, we don’t need the QEMU window anymore. We can hide it by passing the `-display none` argument to QEMU:
+
+    ```toml
+    # in Cargo.toml
+    [package.metadata.bootimage]
+    test-args = [
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
+        "-display", "none"
+    ]
+    ```
+- Useful during running CI or SSH connections
