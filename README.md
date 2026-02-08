@@ -40,6 +40,8 @@
   - [Existing QEMU](#existing-qemu)
   - [I/O Ports](#io-ports)
   - [Using Exit Device](#using-exit-device)
+  - [Printing to the Console](#printing-to-the-console)
+    - [Serial Port](#serial-port)
 
 
 ## Rust Setup 
@@ -1136,5 +1138,109 @@ lazy_static! {
     exit_qemu(QemuExitCode::Success);
     ```
 
+- Cargo considers any other exit code than `0` as failure so we have to re-map our new `0`
+    ```toml
+    # in Cargo.toml
+
+    [package.metadata.bootimage]
+    test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+    // bootimage maps our success exit code to exit code 0, 
+    // so that cargo test correctly recognizes the success case and does not 
+    // count the test as failed.
+    test-success-exit-code = 33 # (0x10 << 1) | 1
+    ```
+
+### Printing to the Console
+- To see the test output on the console, we need to send the data from our kernel to the host system somehow
+- There are various ways to achieve this, for example, by sending the data over a TCP network interface.
+- However, setting up a networking stack is quite a complex task, so we will choose a simpler solution instead.
+
+#### Serial Port
+- A simple way to send the data is to use the serial port
+- An old interface standard which is no longer found in modern computers.
+- It is easy to program and QEMU can redirect the bytes sent over serial to the host’s standard output or a file.
+- The chips implementing a serial interface are called UARTs
+- There are lots of UART models on x86
+- The common UARTs today are all compatible with the 16550 UART, so we will use that model for our testing framework.
+- We will use the uart_16550 crate to initialize the UART and send data over the serial port.
+    ```toml
+    # in Cargo.toml
+
+    [dependencies]
+    uart_16550 = "0.2.0"
+    ```
+- The `uart_16550` crate contains a `SerialPort` struct that represents the UART registers but we still need to construct an instance of it ourselves. For that, we create a new serial module with the following content:
+    ```rust
+    // in src/main.rs
+    mod serial;
 
 
+    // in src/serial.rs
+
+    use uart_16500::SerialPort;
+    use Spin::Mutex;
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        pub static ref SERIAL1: Mutex<SerialPort> = {
+            let mut serial_port = unsafe { SerialPort::new(0x3F8) };
+            serial_port.init();
+            Mutex::new(serial_port);
+        }
+    }
+    ```
+- Like with the VGA text buffer, we use `lazy_static` and a spinlock to create a static writer instance. 
+- By using `lazy_static` we can ensure that the `init` method is called exactly once on its first use.
+- Like the `isa-debug-exit` device, the UART is programmed using port I/O
+- Since the UART is more complex, it uses multiple I/O ports for programming different device registers.
+- The `unsafe` `SerialPort::new` function expects the address of the first I/O port of the UART as an argument, from which it can calculate the addresses of all needed ports. 
+- We’re passing the port address `0x3F8`, which is the standard port number for the first serial interface.
+- To make the serial port easily usable, we add `serial_print!` and `serial_println!` macros:
+    ```rust
+    // in src/serial.rs
+
+    #[doc(hidden)]
+    pub fn _print(args: ::core::fmt::Arguments) {
+        use core::fmt::Write;
+        SERIAL1.lock().write_fmt(args).expect("Printing to serial failed");
+    }
+
+    /// Print to the host through the serial interface
+    #[macro_export]
+    macro_rules! serial_print {
+        ($($arg:tt)*) => {
+            $create::serial::_print(format_args!($($arg)*));
+        }
+    }
+
+    #[macro_export]
+    macro_rules! serial_println {
+        () => ($crate::serial_print!("\n")),
+        ($fmt:expr) => ($crate::serial_print!(concat!($fmt, "\n")));
+        ($fmt:expr, $($arg:tt)*) => ($create::serial_print!(
+            concat!($fmt, "\n"), $($arg)*));
+    }
+
+    ```
+- Since the `SerialPort` type already implements the `fmt::Write` trait, we don’t need to provide our own implementation.
+- Now we can print to the serial interface instead of the VGA 
+
+    ```rust
+    // in src/main.rs
+
+    #[cfg(test)]
+    fn test_runner(tests: &[&dyn Fn()]) {
+        serial_println!("Running {} tests", tests.len());
+        for test in tests {
+            test();
+        }
+        
+    }
+
+    #[test_case]
+    fn trivial_test_case() {
+        serial_print!("trivial assertion... ");
+        assert_eq!(1, 1);
+        serial_println!("[ok]");
+    }
+    ```
