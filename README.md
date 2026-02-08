@@ -108,7 +108,107 @@ the compiler MUST choose between two very different machine behaviors:
     trait Copy {}
     ```
 
-- Any type implementing the `trait` means it follows the contract, and thus compiler can decide what instruction to inject. Thus this becomes a **mandatory** thing for the rust compiler. The default comes from the Rust standard library, which internally depends on `libc` present in the `/usr/lib`. This is the core library which implements the memory allocation functions, and a lot more. This also includes utilities which setups the syscalls (kernel functions are not normal function calls, so they can't be resolve by *linker*, instead architecture-specific language thunks are used to call into a kernel) 
+- When a type implements a `trait`, it agrees to a compile-time contract - meaning it provides a concrete implementation for that the trait's required methods
+- The Rust compiler uses this information during compilation to perform monomorphization(for generics) or to setup dynamic dispatch
+- The default implementation of many high level feature comes from Rust standard library (`std`) 
+  - The `std` library is build on top of `core` and `alloc`, and provides OS integration such as I/O, networking, threading and memory allocation
+- On a Linux system `std` typically links agains the system C library (commonly glibc), which is usually under `/usr/lib`. However Rust does not inherently depends on libc - `core` and `alloc` can function without it
+- The dependency appears when using `std`, which requires OS services
+- Memory allocation in a typical Rust program using `std` flows through the global allocator
+  - By default, on linux this allocator delegates to the system allocator, which oftens calls libc's `malloc` 
+    - Internally libc may use system calls like `mmap`
+- System calls are not normal function call and cannot be resolved by linker like regular symbols. 
+  - A symbol is simply a named entity in the compiled program
+    - The linker roles is:
+      - Collect object files (`.o`)
+      - Looks at the undefined symbols
+      - Matches them with the definitions from other object file or libraries
+    <details>
+    <summary> More details </summary>
+
+    ```c
+    // ok.cpp
+    #include<stdio.h>
+
+    using namespace std;
+
+    int main() {
+        printf("hi");
+        return 0;
+    }
+    ```
+
+    ```bash 
+    clang -c ok.cpp 
+    ```
+
+    ```bash
+    nm ok.o
+    0000000000000000 T _main
+                    U _printf
+    0000000000000034 s l_.str
+    0000000000000000 t ltmp0
+    0000000000000034 s ltmp1
+    0000000000000038 s ltmp2
+    ```
+
+    - If you see you find the `U _printf` which means U is Undefined symbol
+    - This object file references the printf but doesn't not defines it
+
+    - ON mac if you try to statically link - because MAC doesn't support static linking. Apples' runtime model heavily rely on dynamic linking. But this will work in linux (Just extra info because I'm using mac)
+    ```bash
+    clang++ ok.cpp -static
+    ok.cpp:3:17: warning: using directive refers to implicitly-defined namespace 'std'
+        3 | using namespace std;
+        |                 ^
+    1 warning generated.
+    ld: library 'crt0.o' not found
+    clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+    ```
+
+    - But if you try on linux this will work
+      - The linker scans for ok.o, sees undefined symbol `printf` 
+      - Then it searches for `libc.a`
+      - Finds the object file that defines `printf` 
+      - Extract it
+      - Places it inside your executable
+      - Resolve relocation entry and put the address
+      - So `call printf` will get replace to `call 0x401230` (let say)
+        - This becomes printf virtual address
+    - How linker decide the address ?
+      - The linker construct a virtual memory layout for the future executable
+      - The linker says:
+        - `.text` section will start at virtual address `0x400000`
+        - `.data` follows
+        - `.bss`
+        - Function will live inside `.text`
+      - In a statically linked ELF executable, there is something called as base virtual address
+      - Historically on linux this is `0x400000` (default base)
+      - Note this is not a physical RAM address. It is VA
+    - When you load the program, what happens?
+      - The OS loader:
+        - read ELF headers
+        - Sees the program expects `.text` at `0x400000`
+        - Maps memory at the virtual address 
+        - Note more than one processes can have same VA. It's MMU work to provide isolation and maps those to different physical addreses. VA are scope to a single process.
+      - There is an other format - PIE (Position Independent Executable)
+        - So instead of `call 0x4021230`, we will have `call offset_from_current_instruction`
+        - This means: wherever the binary is loaded, the relative offset still works
+        - So now loader can choose any start address and the program still runs correctly
+    </details>
+
+  - The kernel lives in separate privileged address space, so user program must use special CPU instruction (such as `syscall` on x86_64) to transition from user mode to kernel mode
+- To perform this transition, small pieces of architecture-specific assembly codes are used
+  - These are called as **thunk**
+  - A thunk is tiny adaptor function that:
+    - Places arguments into the correct CPU registers
+    - Set the system call number
+    - Execute the instruction for `syscall`
+    - Return control back to the user space
+  - These thunks acts as glue between high-level code and low level CPU mechanism required to enter the kernel
+
+- Any type implementing the `trait` means it follows the contract, and thus compiler can decide what instruction to inject. Thus this becomes a **mandatory** thing for the rust compiler. The default comes from the Rust standard library (`std`), which internally depends on `libc` present in the `/usr/lib`. 
+- This is the core library which implements the memory allocation functions, and a lot more. This also includes utilities which setups the syscalls (kernel functions are not normal function calls, so they can't be resolve by *linker*, instead architecture-specific language thunks are used to call into a kernel) 
 - Any good language rather than making these things hardcoded like for example `Copy`, it allows flexibility. the compiler search for all `#[lang = "copy"]` to make that decision. This allows flexibility
 - Ideally we should not provide custom implementation for language items (like `Copy`), it should only be done as last resort  (unless you are building a runtime / OS / core library.)
     - The reason: They are not stable and internal to RUST. They can change when compiler change
