@@ -1036,45 +1036,41 @@ lazy_static! {
   - The outer `&[]` is a borrowed slice 
     - Inside each element is a reference to a dynamically dispatched callable 
 
-- 
--
 - There is some known bug in cargo that leads to `duplicate lang item in crate core:` when we try to write unit test case when we have disabled `std` crate
     ```toml
     panic-abort-tests = true
     ```
 
-```rust
+    ```rust
+    //sets the name of the entry point
+    #![reexport_test_harness_main = "test_main"] 
 
-//sets the name of the entry point
-#![reexport_test_harness_main = "test_main"] 
-
-pub extern "C" fn _start() -> ! {
-    // ...
-    #[cfg(test)]
-    test_main();
-    // ...
-    loop {}
-}
-
-
-#[cfg(test)]
-pub fn test_runner(tests: &[&dyn Fn()]) {
-    println!("Running {} tests", tests.len());
-    for test in tests {
-        test();
+    pub extern "C" fn _start() -> ! {
+        // ...
+        #[cfg(test)]
+        test_main();
+        // ...
+        loop {}
     }
-}
 
-#[test_case]
-fn trivial_assertion() {
-    println!("trivial assertion");
-    assert_eq!(1, 1);
-    println!("[ok]")
-}
-```
 
-[First test case](./images/first-test-case.png)
+    #[cfg(test)]
+    pub fn test_runner(tests: &[&dyn Fn()]) {
+        println!("Running {} tests", tests.len());
+        for test in tests {
+            test();
+        }
+    }
 
+    #[test_case]
+    fn trivial_assertion() {
+        println!("trivial assertion");
+        assert_eq!(1, 1);
+        println!("[ok]")
+    }
+    ```
+
+    ![First test case](./images/first-test-case.png)
 
 ### Existing QEMU
 - Right now we have endless loop `loop {}`
