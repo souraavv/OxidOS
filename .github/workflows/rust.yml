@@ -1,11 +1,12 @@
-name: Build OxidOS
+name: OxidOS Kernel - Build & Headless QEMU Test
 
 on:
   push:
+    branches: [ main ]
   pull_request:
 
 jobs:
-  build:
+  kernel:
     runs-on: ubuntu-latest
 
     defaults:
@@ -13,10 +14,10 @@ jobs:
         working-directory: oxid-os
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install Rust nightly
+      - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src, llvm-tools-preview
@@ -29,6 +30,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86
 
-      - name: Build and Run (Headless)
-        run: timeout 25 cargo bootimage --target x86_64-oxid_os.json
+      - name: Build kernel image
+        run: cargo bootimage --target x86_64-oxid_os.json
 
+      - name: Run kernel tests in headless QEMU
+        run: timeout 60 cargo test
