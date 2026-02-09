@@ -36,14 +36,19 @@
     - [A println Macro](#a-println-macro)
 - [Chapter 4. Testing](#chapter-4-testing)
   - [Testing in Rust](#testing-in-rust)
-  - [Custom Test Framework](#custom-test-framework)
+    - [Custom Test Framework](#custom-test-framework)
   - [Existing QEMU](#existing-qemu)
-  - [I/O Ports](#io-ports)
-  - [Using Exit Device](#using-exit-device)
+    - [I/O Ports](#io-ports)
+    - [Using Exit Device](#using-exit-device)
   - [Printing to the Console](#printing-to-the-console)
     - [Serial Port](#serial-port)
     - [Print an Error Message on Panic](#print-an-error-message-on-panic)
-  - [Hiding QEMU](#hiding-qemu)
+    - [Hiding QEMU](#hiding-qemu)
+    - [Timeouts](#timeouts)
+    - [Insert Print Automatically](#insert-print-automatically)
+  - [Testing the VGA Buffer](#testing-the-vga-buffer)
+    - [Integration Tests](#integration-tests)
+    - [Create a Library](#create-a-library)
 
 
 ## Rust Setup 
@@ -976,7 +981,7 @@ lazy_static! {
 - Unfortunately testing is complex for `no_std` application 
   - The problem is Rust's test framework uses built-in `test` library which relies on `std` library
 
-### Custom Test Framework
+#### Custom Test Framework
 - Fortunately, rust supports replacing the default test framework through the unstable `custom_test_framework` feature
 - This feature require no external libraries and thus also work in `#[no_std]` environment
   - It works by calling user specified runner function annotated with `[test_case]`
@@ -1096,7 +1101,7 @@ lazy_static! {
   - `iosize` 
   - These specify the IO port through which the device is reachable from our kernel
 
-### I/O Ports
+#### I/O Ports
 - There are different way of communicating b/w CPU and peripheral hardware on `x86_64`
   - Memory Mapped IO
   - Port Mapped IO
@@ -1109,7 +1114,7 @@ lazy_static! {
 - The `iobase` parameter specifies on which port address the device should live (`0xf4` is generally unused port on x86 I/O bus)
   - and `iosize` specifies the port size (`0x04` means 4 bytes)
 
-### Using Exit Device
+#### Using Exit Device
 - The functionaliy of `isa-debug-exit` is very simple
 - when a value is written to I/O port specified by `iobase`, it causes QEMU to exit with exit status `(value << 1) | 1`
 - So when we write `0` to the port, QEMU will exit with exit status `1`and when we write `1` then `3`
@@ -1272,7 +1277,7 @@ lazy_static! {
 - Note that we still need an endless loop after the `exit_qemu` call because the compiler does not know that the `isa-debug-exit` device causes a program exit.
 
 
-### Hiding QEMU
+#### Hiding QEMU
 - Since we report out the complete test results using the `isa-debug-exit` device and the serial port, we don’t need the QEMU window anymore. We can hide it by passing the `-display none` argument to QEMU:
 
     ```toml
@@ -1284,3 +1289,223 @@ lazy_static! {
     ]
     ```
 - Useful during running CI or SSH connections
+
+#### Timeouts
+- `cargo test` waits until the test runner exits, a test that never returns can block the test runner forever. 
+- In our case endless loop can occur in various situations:
+  - The booloader fails to load our kernel, which causes system to reboot endlessly
+  - The BIOS/UEFI firmware fails to load the bootloader, which causes the same endless rebooting
+  - The CPU enter a `loop {}` statement for some function because QEMu exit device doesn't not work properly
+  - the hardware causes a system reset, for ex. CPU exception is not caught
+- So we will use timeout
+- The feature is supported by `bootimage` tool
+    ```toml
+    [package.metadata.bootimage]
+    test-timeout = 300 
+    ```
+
+#### Insert Print Automatically
+- Currently we are writing `serial_print!` each time, but we can avoid this. And this is somethign we need in each test case by default out-of-the-box
+    ```rust
+    #[test_case]
+    fn trivial_assertion() {
+        serial_print!("trivial assertion... ");
+        assert_eq!(1, 1);
+        serial_println!("[ok]");
+    }
+    ```
+- Improvements
+    ```rust
+    pub trait Testable {
+        fn run(&self) -> ();
+    }
+
+    impl<T> Testable for T where T: Fn() {
+        fn run(&self) {
+            serial_print!("{}...\t", core::any::type_name::<T>());
+            self();
+            serial_println!("[ok]");
+        }
+    }
+    ```
+
+    ```rust
+    #[cfg(test)]
+    pub fn test_runner(tests: &[&dyn Testable]) {
+        serial_println!("Running {} test case", tests.len());
+        for test in tests {
+            test.run();
+        }
+        exit_qemu(QemuExitCode::Success);
+    }
+    ```
+
+    ```rust
+    #[test_case]
+    fn trivial_case() {
+        assert_eq!(1, 1);
+    }
+    ```
+
+### Testing the VGA Buffer
+
+```rust
+#[test_case]
+fn test_println_simple() {
+    println!("test_println_simple output");
+}
+```
+
+```rust
+#[test_case]
+fn test_println_many() {
+    for _ in 0..200 {
+        println!("test_println_many output");
+    }
+}
+```
+
+```rust
+#[test_case]
+fn test_println_output() {
+    let s = "Some test string that fits on a single line";
+    println!("{}", s);
+    for (i, c) in s.chars().enumerate() {
+        let screen_char = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 2][i].read();
+        assert_eq!(char::from(screen_char.ascii_character), c);
+    }
+}
+```
+
+#### Integration Tests
+- The convention for integration tests in Rust is to put them into a tests directory in the project root
+- Both the default test framework and custom test frameworks will automatically pick up and execute all tests in that directory.
+- All integration tests are their own executables and completely separate from our main.rs
+- This means that each test needs to define its own entry point function.
+    ```rust
+    #![no_std]
+    #![no_main]
+    #![feature(custom_test_frameworks)]
+    #![test_runner(crate::test_runner)]
+    // Generate the test harness main function and export it under the name test_main.
+    #![reexport_test_harness_main = "test_main"]
+
+    use core::panic::PanicInfo;
+
+    #[unsafe(no_mangle)] 
+    pub extern "C" fn _start() -> ! {
+        test_main();
+
+        loop{}
+    }
+
+    fn test_runner(tests: &[&dyn Fn()]) {
+        unimplemented();
+    }
+
+    #[panic_handler]
+    fn panic(info: &PanicInfo) -> ! {
+        loop {}
+    }
+    ```
+- Since integration tests are separate executables, we need to provide all the crate attributes (no_std, no_main, test_runner, etc.) again
+  - As well no access to the method in the main.rs, since test are built completely separately from our `main.rs` executable
+  - We use the `unimplemented` macro that always panics as a placeholder for the test_runner function and just loop in the panic handler for now.
+- If you run `cargo test` at this stage, you will get endless loop because the panic handler loop endlessly
+
+#### Create a Library
+- To make the required functions available to our integration test, we need to split off a library from our main.rs
+  - which can be included by other crates and integration test executables
+
+    ```rust
+    // src/lib.rs
+
+    #![no_std]
+    #![cfg_attr(test, no_main)]
+    #![feature(custom_test_frameworks)]
+    #![test_runner(crate::test_runner)]
+    #![reexport_test_harness_main = "test_main"]
+
+    use core::panic::PanicInfo;
+
+    pub trait Testable {
+        fn run(&self) -> ();
+    }
+
+    impl<T> Testable for T
+    where
+        T: Fn(),
+    {
+        fn run(&self) {
+            serial_print!("{}...\t", core::any::type_name::<T>());
+            self();
+            serial_println!("[ok]");
+        }
+    }
+
+    pub fn test_runner(tests: &[&dyn Testable]) {
+        serial_println!("Running {} tests", tests.len());
+        for test in tests {
+            test.run();
+        }
+        exit_qemu(QemuExitCode::Success);
+    }
+
+    pub fn test_panic_handler(info: &PanicInfo) -> ! {
+        serial_println!("[failed]\n");
+        serial_println!("Error: {}\n", info);
+        exit_qemu(QemuExitCode::Failed);
+        loop {}
+    }
+
+    /// Entry point for `cargo test`
+    #[cfg(test)]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _start() -> ! {
+        test_main();
+        loop {}
+    }
+
+    #[cfg(test)]
+    #[panic_handler]
+    fn panic(info: &PanicInfo) -> ! {
+        test_panic_handler(info)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u32)]
+    pub enum QemuExitCode {
+        Success = 0x10,
+        Failed = 0x11,
+    }
+
+    pub fn exit_qemu(exit_code: QemuExitCode) {
+        use x86_64::instructions::port::Port;
+
+        unsafe {
+            let mut port = Port::new(0xf4);
+            port.write(exit_code as u32);
+        }
+    }
+
+    ```
+- To make our `test_runner` available to executables and integration tests, we make it public and don’t apply the `cfg(test)` attribute to it. 
+- `feature(custom_test_frameworks)`
+  - This enables nightly support for replacing Rust’s default test harness.
+  - Without this:
+    - Rust generates its own runner which depends on `std`
+- `test_runner(crate::test_runner)`
+  - Collect all `#[test_case]` functions and pass them to this function.
+    ```rust
+    fn test_main() {
+        test_runner(&[&test1, &test2, ...]);
+    }
+    ```
+- `cfg_attr(test, no_main)`
+  - When building normally : keep normal behavior
+  - When running cargo test then apply `#![no_main]`
+  - Because when testing the library in kernel mode
+    - There is no OS, no C runtime
+    - So we must define our `_start` 
+- `reexport_test_harness_main = "test_main"`
+  - This exposes the generated test harness entry function under the name `test_main`.
