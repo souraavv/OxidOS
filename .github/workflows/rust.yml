@@ -11,7 +11,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: oxid-os
+        working-directory: oxid_os
 
     steps:
       - name: Checkout source

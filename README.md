@@ -28,7 +28,7 @@
     - [Text Buffer](#text-buffer)
     - [Printing](#printing)
   - [Formating Macros](#formating-macros)
-  - [NewLine](#newline)
+    - [NewLine](#newline)
   - [A Global Interface](#a-global-interface)
     - [Lazy Statics](#lazy-statics)
     - [SpinLocks](#spinlocks)
@@ -381,7 +381,7 @@ the compiler MUST choose between two very different machine behaviors:
 
     ```bash 
     [[bin]]
-    name = "oxid-os"
+    name = "oxid_os"
     test = false
     bench = false
     ```
@@ -493,7 +493,7 @@ the compiler MUST choose between two very different machine behaviors:
 - To avoid passing `--target` param each time to the compiler let set that in .toml file
     ```bash
     [build]
-    target = "x86_64-blog_os.json"
+    target = "x86_64-oxid_os.json"
     ```
 - Now on we can use `cargo build` and that will use target defined in cargo.toml file as default 
 
@@ -789,7 +789,7 @@ pub fn print_something() {
 - `unwrap()` means if it `Ok()`, give me a value. If it's `Err`, then panic
   - This isn’t a problem in our case, since writes to the VGA buffer never fail.
 
-### NewLine
+#### NewLine
 
 ```rust
 impl Writer {
@@ -1509,3 +1509,5 @@ fn test_println_output() {
     - So we must define our `_start` 
 - `reexport_test_harness_main = "test_main"`
   - This exposes the generated test harness entry function under the name `test_main`.
+- The library is usable like a normal external crate
+  - 

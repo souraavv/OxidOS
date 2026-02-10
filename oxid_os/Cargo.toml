@@ -1,8 +1,9 @@
 [package]
-name = "oxid-os"
+name = "oxid_os"
 version = "0.1.0"
 edition = "2024"
 author = ["Sourav Sharma <souravsharma2468@gmail.com>"]
+
 
 # the profile used for `cargo build`
 [profile.dev]
@@ -26,9 +27,16 @@ panic = "abort" # disable stack unwinding on panic
 # This auto-generated binary is called the test harness. Our main is not used
 # not the panic handler and entry point (start)
 [[bin]]
-name = "oxid-os"
+name = "oxid_os"
 test = true
 bench = false
+
+[lib]
+name = "oxid_os"
+
+[[test]]
+name = "should_panic"
+harness = false
 
 [dependencies]
 bootloader = "0.9"
@@ -43,8 +51,12 @@ features = ["spin_no_std"]
 
 [package.metadata.bootimage]
 test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
-    "-display", "none"
+    "-device", 
+    "isa-debug-exit,iobase=0xf4,iosize=0x04", 
+    "-serial", 
+    "stdio",
+    "-display", 
+    "none"
 ]
 # bootimage maps our success exit code to exit code 0, 
 # so that cargo test correctly recognizes the success case and does not 
