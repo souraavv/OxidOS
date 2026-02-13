@@ -49,6 +49,11 @@
   - [Testing the VGA Buffer](#testing-the-vga-buffer)
     - [Integration Tests](#integration-tests)
     - [Create a Library](#create-a-library)
+- [Chapter 5. CPU Exceptions](#chapter-5-cpu-exceptions)
+  - [The Interrupt Descriptor Table](#the-interrupt-descriptor-table)
+  - [An IDT Type](#an-idt-type)
+  - [The Interrupt Calling Convention](#the-interrupt-calling-convention)
+    - [Preserved and Scratch Register](#preserved-and-scratch-register)
 
 
 ## Rust Setup 
@@ -1510,4 +1515,126 @@ fn test_println_output() {
 - `reexport_test_harness_main = "test_main"`
   - This exposes the generated test harness entry function under the name `test_main`.
 - The library is usable like a normal external crate
-  - 
+  
+## Chapter 5. CPU Exceptions
+- CPU exceptions occur in various erroneous situations, for example, when accessing an invalid memory address or when dividing by zero
+- To react to them we have setup IDT (Interrupt Descriptor Table)
+- This table provides the handler functions
+- An exception signals that something is wrong with the current intruction 
+- On x86 there are 20 different CPU exception type
+  - Page Fault: Illegal memory access (attempt to write to unmapped or read-only page)
+  - Invalid OpCode
+  - General Protection: such as trying to execute a privileged instruction in user-level code or writing reserved fields in configuration registers
+  - Double Fault:  When an exception occurs, the CPU tries to call the corresponding handler function. If another exception occurs while calling the exception handler, the CPU raises a double fault exception
+  - Triple Fault: If an exception occurs while the CPU tries to call the double fault handler function
+
+### The Interrupt Descriptor Table
+- Handle function for each CPU exception
+- IDT is the table that hardware uses directly, so we need a predefined format
+- Each entry must have following 16-byte structure
+    | Type | Name                        | Description                                                     |
+    |------|-----------------------------|-----------------------------------------------------------------|
+    | u16  | Function Pointer [0:15]     | The lower bits of the pointer to the handler function.         |
+    | u16  | GDT selector                | Selector of a code segment in the global descriptor table.     |
+    | u16  | Options                     | (see below)                                                     |
+    | u16  | Function Pointer [16:31]    | The middle bits of the pointer to the handler function.        |
+    | u32  | Function Pointer [32:63]    | The remaining bits of the pointer to the handler function.     |
+    | u32  | Reserved                    |
+
+- The options field has the following format:
+    | Bits  | Name                             | Description                                                                 |
+    |-------|----------------------------------|-----------------------------------------------------------------------------|
+    | 0-2   | Interrupt Stack Table Index      | 0: Don’t switch stacks, 1-7: Switch to the n-th stack in the Interrupt Stack Table when this handler is called. |
+    | 3-7   | Reserved                         |                                                                             |
+    | 8     | 0: Interrupt Gate, 1: Trap Gate  | If this bit is 0, interrupts are disabled when this handler is called.     |
+    | 9-11  | must be one                      |                                                                             |
+    | 12    | must be zero                     |                                                                             |
+    | 13-14 | Descriptor Privilege Level (DPL) | The minimal privilege level required for calling this handler.             |
+    | 15    | Present                          |                                                                             |
+
+- Each exception has predefined index in the IDT
+  - Eg. page fault has index 14
+  - Thus hardware can automatically load corresponding IDT entry for each exception
+- When an exception occurs, the CPU roughly does the following:
+  - Push some register on the stack, including the instruction pointer and the RFLAGS register
+  - Read the corresponding entry from the IDT. For example, the CPU reads the 14th entry when a page fault occurs
+  - Check if the entry is present and, if not, raise a double fault
+  - Disable hardware interrupts if the entry is an interrupt gate (bit 40 not set)
+  - Load the specified GDT selector into the CS (code segment)
+  - Jump to the specified handler function
+
+### An IDT Type
+- Instead of creating our own IDT type, we will use the `InterruptDescriptorTable` struct of the `x86_64` crate, which looks like this:
+    ```rust
+    #[repr(C)]
+    pub struct InterruptDescriptorTable {
+        pub divide_by_zero: Entry<HandlerFunc>,
+        pub debug: Entry<HandlerFunc>,
+        pub non_maskable_interrupt: Entry<HandlerFunc>,
+        pub breakpoint: Entry<HandlerFunc>,
+        pub overflow: Entry<HandlerFunc>,
+        pub bound_range_exceeded: Entry<HandlerFunc>,
+        pub invalid_opcode: Entry<HandlerFunc>,
+        pub device_not_available: Entry<HandlerFunc>,
+        pub double_fault: Entry<HandlerFuncWithErrCode>,
+        pub invalid_tss: Entry<HandlerFuncWithErrCode>,
+        pub segment_not_present: Entry<HandlerFuncWithErrCode>,
+        pub stack_segment_fault: Entry<HandlerFuncWithErrCode>,
+        pub general_protection_fault: Entry<HandlerFuncWithErrCode>,
+        pub page_fault: Entry<PageFaultHandlerFunc>,
+        pub x87_floating_point: Entry<HandlerFunc>,
+        pub alignment_check: Entry<HandlerFuncWithErrCode>,
+        pub machine_check: Entry<HandlerFunc>,
+        pub simd_floating_point: Entry<HandlerFunc>,
+        pub virtualization: Entry<HandlerFunc>,
+        pub security_exception: Entry<HandlerFuncWithErrCode>,
+        // some fields omitted
+    }
+    ```
+- The fields have the type `idt::Entry<F>`, which is a struct that represents the fields of an IDT entry
+- The type parameter `F` defines the expected handler function type
+- We see some entries requires a `HanlderFunc` and some entries requires `HandlerFuncWithErrCode`
+  - The page fault even has its own special type: `PageFaultHandlerFunc`
+- Let's look at the `HandlerFunc` type first:
+    ```rust
+    type HandlerFunc = extern "x86-interrupt" fn (_: InterruptStackFrame);
+    ```
+- It's a type alias for an extern x86-interrupt `fn` type
+- The `extern` keyword defines a function with a foreign calling convention and is often used to communicate with C code
+  - This is an agreeement to the contract which both sign so that they can understand each other
+- But what is `x86-interrupt` calling convention?
+
+### The Interrupt Calling Convention
+- Exceptions are quite simlar to function calls
+- The CPU jumps to the first instruction of the called function and execute it.
+- Afterwards, CPU jumps to the return address and continue the execution of parent function
+- However, there is a major difference between exception and function calls:
+  - A function call is invoked voluntarily by a compiler inserted `call` instruction
+  - While an exception might occur at any instruction
+- In order to understand the consequences of the differences, we need to examine function calls in more details
+- Calling Convention specify the details of function call
+  - For example, they specify where function parameter are placed (e.g., in register or on the stack) and how results are returned
+  - On `x86_64` linux, the following rules applies to a C function (Specified by system V ABI)
+    - The first six interger arguments are passed in register
+      - `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9` 
+    - Additional arguments are passed over the stack
+    - Return results are returned in `rax` and `rdx`
+- Note that Rust doesn't follow C ABI (In fact, there isn't Rust ABI yet), so the rules apply only to the functions declared with `extern "C" fn`
+
+#### Preserved and Scratch Register
+- The calling convention divides the registers into two parts:
+  - preserved and scratch registers
+- The values of preserved registers must remain unchanged across function calls.
+- So a called function (the "callee") is only allowed to overwrite these registers if it restores their original value before returning. 
+  - Therefore, these registers are called "callee-saved"
+  - A common pattern is to save these registers to the stack at the function's beginning and restore them just before returning
+- In contrast, a called function is allowed to overwrite scratch register without restrictions
+  - If the caller wants to preserve the value of the scratch register across a function call, it needs to backup and restore it before function call (e.g., by pushing it to the stack).
+  - So scratch registers are caller-saved
+- On `x86_64`, the C calling convention specifies the following preserved and scratch register
+    | Category            | Registers                                      | Convention     |
+    |---------------------|-----------------------------------------------|---------------|
+    | Preserved Registers | rbp, rbx, rsp, r12, r13, r14, r15             | Callee-saved  |
+    | Scratch Registers   | rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11     | Caller-saved  |
+- The compiler know these rules, so it generate the code accordingly 
+- For example most function begin with `push rbp`, which backup `rbp` on the stack (because it's a callee-saved register)
