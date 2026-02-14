@@ -56,6 +56,9 @@
     - [Preserved and Scratch Register](#preserved-and-scratch-register)
     - [Preserving all Registers](#preserving-all-registers)
     - [The Interrupt Stack Frame](#the-interrupt-stack-frame)
+  - [Implementation](#implementation)
+    - [Lazy Static to Rescue](#lazy-static-to-rescue)
+    - [Test](#test)
 
 
 ## Rust Setup 
@@ -1675,3 +1678,114 @@ fn test_println_output() {
 - It is passed to the interrupt handler as `&mut` and can be used to retrieve additional information about exception cause
 - The struct contains no error code field, since only a few exception push an error code
   - These exception uses the separate `HandlerFuncWithErrCode` function type, which has an additional `error_code` segment
+
+### Implementation
+
+- Its time to handle CPU exception in our kernel, We'll start by creating a new interrupt module in `src/interrupt.rs`
+    ```rust
+    // src/lib.rs
+    pub mod interrups;
+
+    // src/interrupts.rs
+
+    use x86_64::structures::idt::InterruptDescriptorTable;
+
+    pub fn init_idt() {
+        let mut idt = InterruptDescriptorTable::new();
+    }
+
+    ```
+- Now we can add handler functions. We start by adding a handler for the breakpoint exception 
+- The purpose is to temporarily pause a program when the breakpoint instruction `int3` is executed
+- the breakpoint exception is commonly used in debuggers: When the user sets the breakpoint, the debugger overwrites the corresponding instruction with the `int3` instruction so that the CPU throws the breakpoint exception when it reach that line
+- When the user wants to continue the program, the debugger replaces the `int3` instruction with the original instruction again and continue the program
+- For our use case, we don't need to overwrite an instruction.
+  - Instead, we just want to print a message when the breakpoint instruction in executed and then continue the program
+  - So lets create a simple `breakpoint_handler` function and add it to our IDT:
+    ```rust
+    // src/interrupts.rs
+
+    use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+    use crate::println;
+
+    pub fn init_idt() {
+        let mut idt = InterruptDescriptorTable::new();
+        idt.breakpoint.set_handler(breakpoint_handler);
+    }
+
+    extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+        println!("EXCEPTION BREAKPOINT\n {:#?}", stack_frame);
+    }
+    ```
+- `x86-interrupt` calling convention is still unstable. To use it anyway, we have to explicitly enable it by adding `#![feature(abi_x86_interrupt)]` at the top of our `lib.rs`
+- Loading the IDT
+    ```rust
+    // in src/interrupts.rs
+
+    pub fn init_idt() {
+        let mut idt = InterruptDescriptorTable::new();
+        idt.breakpoint.set_handler(breakpoint_handler);
+        idt.load();
+    }
+    ```
+- The `load` method expect a `&'static self`, that is, a reference valid for the complete runtime of the program
+- The reason is that the CPU will access this table on every interrupt. so using a shorter lifetime than `'static` could lead to use-after-free bugs
+- In order to fix this problem, we need to store our idt at a place where it has a `'static` lifetime. To achieve this, we could allocate our IDT on the heap using `Box` and then convert it to a `'static` reference, but we are writing an OS kernel and thus don’t have a heap (yet).
+- As an alternative, we could try to store the IDT as a `static`:
+    ```rust
+    static IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
+
+    pub fn init_idt() {
+        IDT.breakpoint.set_handler_fn(breakpoint_handler);
+        IDT.load();
+    }
+    ```
+- However, there is a problem: Statics are immutable, so we can’t modify the breakpoint entry from our init function. We could solve this problem by using a `static mut`. But as soon as you add `mut` with the `static` it is unsafe for RUSt. Because the variable is available every where in the code and multiple threads can modify this. There is no borrowing system tracking usage. 
+- So the compiler cannot prove: that two mutable accesses won't happen simultaneously
+- Since rust can not verify you must use `unsafe` which means As a programmer, I guarantee this is safe
+    ```rust
+    static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
+
+    pub fn init_idt() {
+        unsafe {
+            IDT.breakpoint.set_handler_fn(breakpoint_handler);
+            IDT.load();
+        }
+    }
+    ```
+#### Lazy Static to Rescue
+- The `lazy_static` uses the `unsafe` behind the scene, but it is abstracted away in a safe interface
+    ```rust
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref IDT: InterruptDescriptorTable = {
+            let mut idt = InterruptDescriptorTable::new();
+            idt.breakpoint.set_handler_fn(breakpoint_handler);
+            idt
+        }
+    }
+
+    pub fn init_idt() {
+        IDT.load();
+    }
+    ```
+
+#### Test
+
+```rust
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    println!("hello world{}", "!");
+
+    oxid_os::init();
+
+    x86_64::instructions::interrupts::int3();
+
+    #[cfg(test)]
+    test_main();
+
+    println!("it did not crash!");
+    loop {}
+}
+```
