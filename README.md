@@ -54,6 +54,8 @@
   - [An IDT Type](#an-idt-type)
   - [The Interrupt Calling Convention](#the-interrupt-calling-convention)
     - [Preserved and Scratch Register](#preserved-and-scratch-register)
+    - [Preserving all Registers](#preserving-all-registers)
+    - [The Interrupt Stack Frame](#the-interrupt-stack-frame)
 
 
 ## Rust Setup 
@@ -1638,3 +1640,38 @@ fn test_println_output() {
     | Scratch Registers   | rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11     | Caller-saved  |
 - The compiler know these rules, so it generate the code accordingly 
 - For example most function begin with `push rbp`, which backup `rbp` on the stack (because it's a callee-saved register)
+
+#### Preserving all Registers
+- In contrast to the function calls, exception can occur on any instruction
+- In most cases, we don't even know at compile time if the generated code will cause an exception
+- For example, the compiler can't know if an instruction causes a stack overflow or a page fault
+- Since we don't know when an exception occurs, we can't backup any registers before
+- This means we can't use a calling convention that relies on caller-saved register for exception handler
+- Instead, we need a calling convention that preserves **all register**
+- The `x86-interrupt` calling convention is such a calling convention
+  - So it guarantees that all the register value are restored to their original value on function return
+- Note that this doesn't means all registers are saved to the stack at function entry. Instead, the compiler only backups the register which are overwritten by function. 
+  - This way, very efficient code can be generated for short function that only uses few register
+
+#### The Interrupt Stack Frame
+- On a normal function call (using `call` instruction), the CPU pushes the return address before calling the target function
+- On function return (using the `ret` instruction), the CPU pops this return address and jump to it.
+    ![Old and New Stack](./images/return.png)
+- For exception and interrupt handler, however pushing a return address is not sufficient (Think why?)
+  - Because since interrupt handler often run in different context (stack pointer, CPU flags, etc)
+- Instead, the CPU performs the following step when an interrupt occurs:
+
+0. **Saving the old stack pointer**: The CPU reads the stack pointer `rsp` and stack segment `ss` register value (base of stack) and remember them in an internal buffer.
+1. **Aligning the Stack pointer**: Special casing - An interrupt can occur any intruction, so the stack pointer can have any value, too. However, some CPU instruction (e.g., some SSE instruction) requires that the stack pointer be aligned on a 16-byte boundary, so the CPU performs such an alignment right after the interrupt
+2. **Switching Stack**(in some cases): A stack switch occurs when the CPU priviledge level changes, for example, when a CPU exception occurs in a user-mode program. It is also possible to configure stack switches for a specific interrupt using so called *Interrupt Stack Table* 
+3. **Pushing the old stack pointer**: The CPU pushes the `rsp` and `ss` values from step 0 to the stack. This makes it possible to restore the original stack pointer when returning from an interrupt handler
+4. **Pushing and updating the `RFLAG` register**: The `RFLAG` register contains various control and status bit. On interrupt entry, the CPU changes some bits and pushes the old value
+5. **Pushing the IP - Instruction Pointer**: Before jumping to the interrupt handler function, the CPU pushes the instruction pointer (`rip`) and the code segment (`cs`). This is comparable to the return address push of a normal function call
+6. **Pushing an error code**: For some specific exception, such as page fault, the CPU pushes an error code, which describes the cause of the exception
+7. **Invoking the interrupt handler** The CPU reads the address and segment descriptor of the interrupt handler function from the corresponding field in the IDT. It then invokes the handler by loading the value into the `rip` and `cs` registers
+    ![Interrupt Stack Frame](./images/interrupt-stack-frame.png)
+
+- In `x86_64` crate, the interrupt stack frame is represented by the `InterruptStackFrame` struct
+- It is passed to the interrupt handler as `&mut` and can be used to retrieve additional information about exception cause
+- The struct contains no error code field, since only a few exception push an error code
+  - These exception uses the separate `HandlerFuncWithErrCode` function type, which has an additional `error_code` segment
