@@ -59,6 +59,11 @@
   - [Implementation](#implementation)
     - [Lazy Static to Rescue](#lazy-static-to-rescue)
     - [Test](#test)
+- [Chapter 6. Double Faults](#chapter-6-double-faults)
+  - [What is Double Fault ?](#what-is-double-fault-)
+  - [Triggering a Double Fault](#triggering-a-double-fault)
+  - [A Double Fault Handler](#a-double-fault-handler)
+  - [Causes of Double Faults](#causes-of-double-faults)
 
 
 ## Rust Setup 
@@ -1789,3 +1794,85 @@ pub extern "C" fn _start() -> ! {
     loop {}
 }
 ```
+
+## Chapter 6. Double Faults
+
+### What is Double Fault ?
+- An Exception that occurs when the CPU fails to invoke an exception handler
+  - For example, it occurs when a page fault is triggered, but there is no page fault handler
+- It is important to provide the double fault handler, becuase if a double fault is unhandled, then triple fault occurs. Triple fault can not be caught, and most hardware reacts with a system reset
+
+### Triggering a Double Fault
+
+- Provoke a double fault handler 
+    ```rust
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _start() -> ! {
+        println!("hello world!");
+
+        oxid_os::init();
+
+        // triggers page fault
+        unsafe {
+            *(0xsouravsh as *mut u8) = 42;
+        };    
+
+    }
+    ```
+- We used `unsafe` because we are trying to access an invalid address i.e., `souravsh`
+  - Thus page fault will happen.
+- We haven't registered a page fault handler in our IDT, so a double page fault occurs
+  - The CPU on this fault will look for double fault handler, and that is also not defined, which will lead to triple fault
+  - A triple fault is fatal, and QEMU reacts to it like most real hardware and issues a system reset
+
+### A Double Fault Handler
+- A double fault handler is a normal exception with an error code 
+    ```rust
+    lazy_static! {
+        static ref IDT: InterruptDescriptorTable = {
+            let mut idt = InterruptDescriptorTable::new();
+            idt.breakpoint.set_handler_fn(breakpoint_handler);
+            idt.double_fault.set_handler_fn(double_fault_handler);
+            idt
+        };
+    }
+
+    extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, _error_code: u64) -> ! {
+        panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+    }
+    ```
+- The error code of a double fault handler is always 0, so there's is no reason to print this
+- One difference is you defined `double_fault_handler` as diverging function i.e., no return (`!`)
+  - The reason is that `x86_64` architecture doesn't allow to return from a double fault exception
+- Ok, then done ? No the current approach is not sufficient. It doesn't cover all the cases.
+
+### Causes of Double Faults
+- What causes double faults ?
+  - A double fault is a special exception that occurs when the CPU **fails to invoke** an exception handler.
+- What does "fail to invoke" means exactly ?
+  - The handler not present ?
+  - The handler is swapped out ?
+  - And what happen if handler causes exception itself ?
+- For example,
+  - A breakpoint exception occurs, but the corresponding handler function is swapped out?
+  - A page fault occurs, but the page fault handler is swapped out?
+  - Our kernel overflows its stack and the guard page is hit?
+- According to AMD64 manual 
+  - A double fault exception **can** occur when a second exception occurs during the handling of a prior (first) exception handler
+  - The “can” is important: Only very specific combinations of exceptions lead to a double fault. 
+- Importantly, the CPU can itself fault while trying to deliver the exception. Whether this leads to normal handling or a double fault depends entirely on what kind of fault happens during this delivery process.
+- The combinations are:
+
+| First Exception              | Second Exception                                                                 |
+|-----------------------------|----------------------------------------------------------------------------------|
+| Divide-by-zero              | Invalid TSS, Segment Not Present, Stack-Segment Fault, General Protection Fault |
+| Invalid TSS                 | Invalid TSS, Segment Not Present, Stack-Segment Fault, General Protection Fault |
+| Segment Not Present         | Invalid TSS, Segment Not Present, Stack-Segment Fault, General Protection Fault |
+| Stack-Segment Fault         | Invalid TSS, Segment Not Present, Stack-Segment Fault, General Protection Fault |
+| General Protection Fault    | Invalid TSS, Segment Not Present, Stack-Segment Fault, General Protection Fault |
+| Page Fault                  | Page Fault, Invalid TSS, Segment Not Present, Stack-Segment Fault, General Protection Fault |
+
+- So, for example, a divide-by-zero fault followed by a page fault is fine (the page fault handler is invoked), but a divide-by-zero fault followed by a general-protection fault leads to a double fault.
+- With the help of this table, we can answer the first three of the above questions:
+  - If a breakpoint exception occurs and the corresponding handler function is swapped out, a page fault occurs and the page fault handler is invoked (not a double fault)
+  - If a page fault occurs and the page fault handler is swapped out, a double fault occurs and the double fault handler is invoked.
