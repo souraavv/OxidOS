@@ -64,6 +64,11 @@
   - [Triggering a Double Fault](#triggering-a-double-fault)
   - [A Double Fault Handler](#a-double-fault-handler)
   - [Causes of Double Faults](#causes-of-double-faults)
+  - [Kernel Stack Overflow](#kernel-stack-overflow)
+    - [Switching Stacks](#switching-stacks)
+  - [The IST and TSS](#the-ist-and-tss)
+  - [Creating a TSS](#creating-a-tss)
+    - [Loading the TSS](#loading-the-tss)
 
 
 ## Rust Setup 
@@ -1876,3 +1881,99 @@ pub extern "C" fn _start() -> ! {
 - With the help of this table, we can answer the first three of the above questions:
   - If a breakpoint exception occurs and the corresponding handler function is swapped out, a page fault occurs and the page fault handler is invoked (not a double fault)
   - If a page fault occurs and the page fault handler is swapped out, a double fault occurs and the double fault handler is invoked.
+
+### Kernel Stack Overflow
+- What happen if our kernel stack overflow its stack and the guard page is hit
+- A guard page is a special memory page at the bottom (stack grows from top to down) of a stack 
+- This makes it possible to detect stack overflow
+- The page is not mapped to any physical frame
+  - So accessing it cause page fault instead of silently corrupted the memory 
+- The **bootloader** set up the guard page for our kernel stack
+  - So stack overflow causes **page fault**
+- When the page fault happen CPU looks for the page fault handler in the IDT and tries to push the IDT stack frame onto the stack
+  - However current stack poninter points to the non-present guard page
+  - Thus a second page fault occurs, which causes the double fault 
+- So CPU tries to calls the double fault handler now
+  - However in double fault CPU tries to push the exceptions stack frame too
+  - The stack pointer still points to the guard page, so a third page fault occurs
+  - Which causes triple fault - a system reboot
+  - So our current double fault handler can not avoid triple fault
+- We need to somehow ensure that stack is valid when double fault happen
+- Fortunately x86_64 has solution for this problem
+
+#### Switching Stacks
+- The `x86_64` architecture is able to switch to a **predefined, known-good stack when an exception occurs**
+- This switch happens at **hardware level**, so it can be performed before CPU pushes the exception stack frame
+- The switching mechanism is implemented as an Interrupt Stack Table (IST). 
+- The IST table of 7 pointers to known-good stack. In Rust pseudocode:
+    ```rust
+    struct InterruptStackTable {
+        stack_pointers: [Option<StackPointer>; 7],
+    }
+    ```
+- For each exception we can choose a stack from the IST
+
+### The IST and TSS
+- The IST is part of legacy TSS (Task State Segment)
+- The TSS used to hold various pieces of information
+  - Processor register state about a task in 32-bit mode
+- On x86_64, the TSS no longer holds any task-specific information at all.
+- Instead it holds, two stack table (the IST is one of them)
+- The 64-bit TSS has 
+  - Privilege Stack Table
+    - Used by CPU when privilege level changes
+    - For ex. if exception occurs while the CPU is in user mode (privilege level 3), the CPU normally switches to kernel mode (privilege level 0) before invoking the exception handler
+    - We don't have any user level program so far, so we will this for next sections
+  - Interrupt Stack Table
+  - I/O Map based address
+
+### Creating a TSS
+- Let's create a new TSS which contains the separate double fault stack in its Interrupt Stack table
+- For that we need TSS struct - x86_64 provides that `TaskStateSegment struct`
+    ```rust
+    // in /src/lib.rs
+    pub mod gdt;
+
+    // in src/gdt.rs
+
+    use x86_64::VirtAddr;
+    use x86_64::structures::tss::TaskStateSegment;
+    use lazy_static::lazy_static;
+
+    pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+
+    lazy_static! {
+        static ref TSS: TaskStateSegment {
+            let mut tss = TaskStateSegment::new();
+            tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
+                const STACK_SIZE: usize = 4096 * 5;
+                static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+
+                let stack_start = VirtAddr::from_ptr(&raw const STACK);
+                let stack_end = stack_start + STACK_SIZE;
+                stack_end
+            };
+            tss
+        }
+    }
+    ```
+- We are using `lazy_static` because Rust's const evaulator is not yet powerful enough to do this init at the compile time
+- We define the $0^{th}$ entry is the double fault stack (we can pick any other index too)
+- Then we write the top address of a double fault stack into the 0th entry
+  - We write top because stack in x86_64 grows downwards, from high address to low address
+- We haven't implemented memory management yet, so we dont' have proper way to allocate new stack
+- Instead we will use `static mut` array as stack storage for now
+- Note that `static mut` is not an immutable static, because otherwise the bootloader will map it to a read-only page 
+  - Later we will implement stack and then we will replace this impl
+
+#### Loading the TSS
+- Now we need a way to tell the CPU that it should use the TSS (new which we created)
+- Unfortunately, TSS uses the segmentation system (historical reason)
+- Instead of loading the table directly, we need to add a new segment descriptor to the GDT
+- Then we can load our TSS by invoking the `ltr` instruction with respective GDT index
+- LTR is Load Task Register
+  - Task Register is a special CPU register that 
+    - Points to one TSS
+    - The TSS holds the kernel stack pointer, I/O bitmap and some CPU state
+    - Modern OS doesn't use this for task switching, instead only use for privilege transitions
+ 
