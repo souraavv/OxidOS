@@ -61,14 +61,17 @@
     - [Test](#test)
 - [Chapter 6. Double Faults](#chapter-6-double-faults)
   - [What is Double Fault ?](#what-is-double-fault-)
-  - [Triggering a Double Fault](#triggering-a-double-fault)
+    - [Triggering a Double Fault](#triggering-a-double-fault)
   - [A Double Fault Handler](#a-double-fault-handler)
   - [Causes of Double Faults](#causes-of-double-faults)
-  - [Kernel Stack Overflow](#kernel-stack-overflow)
-    - [Switching Stacks](#switching-stacks)
-  - [The IST and TSS](#the-ist-and-tss)
-  - [Creating a TSS](#creating-a-tss)
+    - [Kernel Stack Overflow](#kernel-stack-overflow)
+  - [Switching Stacks](#switching-stacks)
+    - [The IST and TSS](#the-ist-and-tss)
+    - [Creating a TSS](#creating-a-tss)
     - [Loading the TSS](#loading-the-tss)
+    - [The Global Descriptor Table](#the-global-descriptor-table)
+      - [Creating a GDT](#creating-a-gdt)
+    - [The final Steps](#the-final-steps)
 
 
 ## Rust Setup 
@@ -1807,7 +1810,7 @@ pub extern "C" fn _start() -> ! {
   - For example, it occurs when a page fault is triggered, but there is no page fault handler
 - It is important to provide the double fault handler, becuase if a double fault is unhandled, then triple fault occurs. Triple fault can not be caught, and most hardware reacts with a system reset
 
-### Triggering a Double Fault
+#### Triggering a Double Fault
 
 - Provoke a double fault handler 
     ```rust
@@ -1882,7 +1885,7 @@ pub extern "C" fn _start() -> ! {
   - If a breakpoint exception occurs and the corresponding handler function is swapped out, a page fault occurs and the page fault handler is invoked (not a double fault)
   - If a page fault occurs and the page fault handler is swapped out, a double fault occurs and the double fault handler is invoked.
 
-### Kernel Stack Overflow
+#### Kernel Stack Overflow
 - What happen if our kernel stack overflow its stack and the guard page is hit
 - A guard page is a special memory page at the bottom (stack grows from top to down) of a stack 
 - This makes it possible to detect stack overflow
@@ -1901,7 +1904,7 @@ pub extern "C" fn _start() -> ! {
 - We need to somehow ensure that stack is valid when double fault happen
 - Fortunately x86_64 has solution for this problem
 
-#### Switching Stacks
+### Switching Stacks
 - The `x86_64` architecture is able to switch to a **predefined, known-good stack when an exception occurs**
 - This switch happens at **hardware level**, so it can be performed before CPU pushes the exception stack frame
 - The switching mechanism is implemented as an Interrupt Stack Table (IST). 
@@ -1913,7 +1916,7 @@ pub extern "C" fn _start() -> ! {
     ```
 - For each exception we can choose a stack from the IST
 
-### The IST and TSS
+#### The IST and TSS
 - The IST is part of legacy TSS (Task State Segment)
 - The TSS used to hold various pieces of information
   - Processor register state about a task in 32-bit mode
@@ -1927,7 +1930,7 @@ pub extern "C" fn _start() -> ! {
   - Interrupt Stack Table
   - I/O Map based address
 
-### Creating a TSS
+#### Creating a TSS
 - Let's create a new TSS which contains the separate double fault stack in its Interrupt Stack table
 - For that we need TSS struct - x86_64 provides that `TaskStateSegment struct`
     ```rust
@@ -1976,4 +1979,108 @@ pub extern "C" fn _start() -> ! {
     - Points to one TSS
     - The TSS holds the kernel stack pointer, I/O bitmap and some CPU state
     - Modern OS doesn't use this for task switching, instead only use for privilege transitions
- 
+
+#### The Global Descriptor Table
+- GDT is relic that was used for memory segmentation before paging become the de facto standard
+- However it is still need in 64 bit mode for various things, such as kernel/user mode configuration or TSS loading
+- The GDT is a structure that contains the segments of a program
+  - It was used in older architecutre to isolate the program memory 
+- While segmentation is no more used in 64-bit, GDT still exists
+- It is mostly used for two things
+  - Switching between kernel space and user space
+  - And loading TSS structure
+
+##### Creating a GDT
+- Let's create a GDT that includes a segment for our TSS static:
+    ```rust
+    use x86_64::structures::gdt::{GlobalDescriptorTable, Descriptor};
+
+    lazy_static! {
+        static ref GDT: GlobalDescriptorTable = {
+            let mut gdt = GlobalDescriptorTable::new();
+            gdt.add_entry(Descriptor::kernel_code_segment);
+            gdt.add_entry(Descriptor::tss_segment(&TSS));
+            gdt
+        }
+    }
+    ```
+- Loading the GDT: to load our GDT, we create a `gdt::init` function that we call from our `init` method
+    ```rust
+    // in src/gdt.rs
+
+    pub fn init() {
+        GDT.load();
+    }
+
+    // in src/lib.rs
+    pub fn init() {
+        gdt::init();
+        interrupts::init_idt();
+    }
+
+    ```
+
+#### The final Steps
+- The problem is that the GDT segments are not yet active because the segment and TSS register still contains the value from the old GDT
+  - We also need to modify the double Fault IDT entry so that it uses the new stack
+- In summary
+  - We changed our GDT, so we should reload `cs`, the code segment register
+    - This is required since the old segment selector could now point to different GDT
+  - Load the TSS - We loaded the GDT that contains the TSS selector, but we still need to tell CPU that use TSS
+  - Update the IDT entry - As soon as our TSS loaded, the CPU has access to the valid IST
+    - Then we can tell CPU that it should use our new double fault stack by modifying our double fault IDT entry
+- For first two steps
+    ```rust
+    use x86_64::structures::gdt::SegmentSelector;
+
+    lazy_static! {
+        static ref GDT: (GlobalDescriptorTable, Selectors) = {
+            let mut gdt = GlobalDescriptorTable::new();
+            let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
+            let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
+            (gdt, Selectors { code_selector, tss_selector })
+        }
+    }
+
+    struct Selector {
+        code_selector: SegmentSelector,
+        tss_selector: SegmentSelector,
+    }
+    ```
+- Now we can use the selector to reload the `cs` and load our `TSS`
+    ```rust
+    pub fn init() {
+        use x86_64::instructions::tables::load_tss;
+        use x86_64::instructions::segmentation::{CS, Segment};
+
+        GDT.0.load();
+        // Might possible to break memory safety by loading invalid selector, 
+        // thus unsafe
+        unsafe {
+            // reload the code segment register using set_reg
+            CS::set_reg(GDT.1.code_selector);
+            // load the tss using load_tss
+            load_tss(GDT.1.tss_selector);
+        }
+    }
+    ```
+- Now we have loaded TSS and interrupt stack table, we can set the stack index for our double fault handler in the IDT
+
+    ```rust
+    // in src/interrupts.rs
+
+    use crate::gdt;
+    lazy_static! {
+        static ref IDT: InterruptDescriptorTable = {
+            let mut idt = InterruptDescriptorTable::new();
+            idt.breakpoint.set_handler_fn(breakpoint_handler);
+            // set_stack_index is unsafe because of index is valid and not
+            // used by any other exception
+            unsafe {
+                idt.double_fault.set_handler_fn(double_fault_handler)
+                        .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+            }
+        }
+    }
+    ```
+- From now we should never see triple fault again
