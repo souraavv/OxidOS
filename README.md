@@ -72,6 +72,7 @@
     - [The Global Descriptor Table](#the-global-descriptor-table)
       - [Creating a GDT](#creating-a-gdt)
     - [The final Steps](#the-final-steps)
+  - [Summary](#summary)
 
 
 ## Rust Setup 
@@ -1849,6 +1850,8 @@ pub extern "C" fn _start() -> ! {
         panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
     }
     ```
+![Double Fault Handler](./images/double-fault.png)
+
 - The error code of a double fault handler is always 0, so there's is no reason to print this
 - One difference is you defined `double_fault_handler` as diverging function i.e., no return (`!`)
   - The reason is that `x86_64` architecture doesn't allow to return from a double fault exception
@@ -2084,3 +2087,9 @@ pub extern "C" fn _start() -> ! {
     }
     ```
 - From now we should never see triple fault again
+
+### Summary
+- In this chapter we learned double fault handler and under what conditions that happens
+- We added a basic double fault handler that prints an error message and added an intergration test for it
+- We also enabled hardware supported stack switching on double fault exception so that it can also work for stack overflow
+- We also learned about the TSS, IST, GDT
