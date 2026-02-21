@@ -82,6 +82,10 @@
   - [Deadlocks](#deadlocks)
     - [Fixing the Deadlock](#fixing-the-deadlock)
   - [The `hlt` instruction](#the-hlt-instruction)
+  - [Keyboard Input](#keyboard-input)
+    - [Reading the ScanCodes](#reading-the-scancodes)
+    - [Interpretting the scan code](#interpretting-the-scan-code)
+  - [Summary](#summary-1)
 
 
 ## Rust Setup 
@@ -2348,3 +2352,120 @@ pub extern "C" fn _start() -> ! {
     ```
 - The `instruction::hlt()` is a think wrapper around assembly instructions
 - We can now use `hlt_loop` 
+
+### Keyboard Input
+- Now that we can handle interrupts from outside, we can start supporting keyboard interrupts
+- This will allows us to interact with the kernel for the very first time
+
+- So when you a press a key, the keyboard controller sends an interrupt to the PIC
+  - which forwards it to the CPU
+- the CPU looks for the handler function in the IDT - so lets add that
+    ```rust
+
+    #[derive(Debug, Clone, Copy)]
+    #[repr(u8)]
+    pub enum InterruptIndex {
+        TIMER = PIC_1_OFFSET,
+        Keyboard,
+    }
+
+    lazy_static! {
+        static ref IDT: InterruptDescriptorTable = {
+            let mut idt = InterruptDescriptorTable::new();
+            // existing
+
+            idt[InterruptIndex::Keyboard.as_usize()]
+                .set_handler_fn(keyboard_interrupt_handler);
+            idt
+        };
+    }
+
+    extern "x86-interrupt" fn keyboard_interrupt_handler(
+        _stack_frame: InterruptStackFrame) {
+        print!("k");
+
+        unsafe {
+            PICS.lock()
+                .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+        }
+    }
+    ```
+- We now see that a $k$ appears on the screen when we press a key. 
+- However, this only works for the first key we press. Even if we continue to press keys, no more ks appear on the screen. 
+  - This is because the keyboard controller won’t send another interrupt until we have read the so-called scancode of the pressed key.
+
+#### Reading the ScanCodes
+- To find out which key was pressed, we need to query the keyboard controller
+- We do this by reading the data port of the PS/2 controller, which is the I/O port with the number `0x60`
+    ```rust
+    extern "x86-interrupts" fn keyboard_interrupt_handler(
+        _stack_frame: InterruptStackFrame) {
+        use x86_64::instructions::port::Port;
+
+        let mut port = Port::new(0x60);
+        let scancode: u8 = unsafe { port.read() };
+        print!("{}", scancode);
+
+        unsafe {
+            PICS.lock()
+                .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+        }
+    }
+    ```
+
+#### Interpretting the scan code
+- There are three different standards, to map between scancodes and key, they are so-called scancodes sets
+- There is a crate which converts the scancodes into keys
+    ```toml
+    [dependencies]
+    pc-keyboard = "0.7.0"
+    ```
+
+    ```rust
+    extern "x86-interrupt" fn keyboard_interrupt_handler(
+        _stack_frame: InterruptStackFrame)
+    {
+        use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+        use spin::Mutex;
+        use x86_64::instructions::port::Port;
+
+        lazy_static! {
+            static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> = 
+                Mutex::new(Keyboard::new(ScancodeSet1::new(),
+                    layouts::Us104Key, HandleControl::Ignore)
+                );
+        }
+
+        let mut keyboard = KEYBOARD.lock();
+        let mut port = Port::new(0x60);
+
+        let scancode: u8 = unsafe { port.read() };
+        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+            if let Some(key) = keyboard.process_keyevent(key_event) {
+                match key {
+                    DecodedKey::Unicode(character) => print!("{}", character),
+                    DecodedKey::RawKey(key) => print!("{:?}", key),
+                }
+            }
+        }
+
+        unsafe {
+            PICS.lock()
+                .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+        }
+    }
+    ```
+- The `HandleControl` allows us to map ctrl + [a-z] to the Unicode character `U+0001` to `U+001A`
+  - We used `Ignore` because we dont' want so
+- On each interrupt, we lock the Mutex, read the scancode from the keyboard controller, and pass it to the add_byte method, which translates the scancode into an `Option<KeyEvent>` 
+- The `KeyEvent` contains the key which caused the event and whether it was a **press or release event**.
+- To interpret this key event, we pass it to the `process_keyevent` method, which translates the key event to a character, if possible.
+
+### Summary
+- We learned how to enable external interrupts
+- We learned about 8259 PIC
+- We implement handler for the timer interrupt
+- We learned the `htl` instruction
+- We implement the interrupt handler for the keyboard interrupt
+- Now we have basic fundamental building block for creating a small shell or simple games
