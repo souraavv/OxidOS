@@ -73,6 +73,12 @@
       - [Creating a GDT](#creating-a-gdt)
     - [The final Steps](#the-final-steps)
   - [Summary](#summary)
+- [Chapter 7. Hardware Interrupts](#chapter-7-hardware-interrupts)
+  - [The Intel's 8259 PIC](#the-intels-8259-pic)
+    - [Implementation](#implementation-1)
+  - [Enabling Interrupts](#enabling-interrupts)
+  - [Handling Timer Interrupts](#handling-timer-interrupts)
+    - [End of Interrupt](#end-of-interrupt)
 
 
 ## Rust Setup 
@@ -2093,3 +2099,174 @@ pub extern "C" fn _start() -> ! {
 - We added a basic double fault handler that prints an error message and added an intergration test for it
 - We also enabled hardware supported stack switching on double fault exception so that it can also work for stack overflow
 - We also learned about the TSS, IST, GDT
+
+
+## Chapter 7. Hardware Interrupts
+- We will setup the Programmable interrupt controller to correctly forward hardware interrupts to the CPU 
+- To handle these interrupts, we add new entries to our interrupt descriptor table
+  - Just like we added **exception** handler
+- Interrupts provides a way to **notify the CPU** (not OS) from attached hardware devices
+- So instead of letting kernel periodically check the keyboard for each new character (a process calling polling), the keyboard can notify the kernel on each keypress
+- Connecting all hadware devices to CPU is not possible.
+- Instead, a separate *interrupt controller aggregates* the interrupt from all devices and notifies the CPU
+    ```text
+                        ____________             _____
+    Timer ------------> |            |           |     |
+    Keyboard ---------> | Interrupt  |---------> | CPU |
+    Other Hardware ---> | Controller |           |_____|
+    Etc. -------------> |____________|
+
+    ```
+
+- Most interrupts are programmable, which means they support different priority levels for interrupts
+- For example this allows timer interrupt a higher priority than keyboard interrupts to ensure proper timekeeping 
+
+    > [!IMPORTANT]  
+    > Unlike exception, hadware interrupts occurs asynchronously. This means they are completely independent from the executed code and can occur at any time. Thus we suddenly have form of concurrency in our kernel with all potential concurrency-related bugs
+
+- Rust strict ownership model help us here because it forbids mutual global state. However deadlocks are still possible (we will see a way to fix towards the end of this chapter)
+  
+### The Intel's 8259 PIC 
+- PIC introduced in 1976
+  - Now replaced by new APIC
+  - But still supported for backward compatibility reason
+- 8259 PIC is easier to setup than the APIC, so we will use it to introduce ourself to interrupts before we switch to APIC 
+    ```text
+                        ____________                          ____________
+    Real Time Clock --> |            |   Timer -------------> |            |
+    ACPI -------------> |            |   Keyboard-----------> |            |      _____
+    Available --------> | Secondary  |----------------------> | Primary    |     |     |
+    Available --------> | Interrupt  |   Serial Port 2 -----> | Interrupt  |---> | CPU |
+    Mouse ------------> | Controller |   Serial Port 1 -----> | Controller |     |_____|
+    Co-Processor -----> |            |   Parallel Port 2/3 -> |            |
+    Primary ATA ------> |            |   Floppy disk -------> |            |
+    Secondary ATA ----> |____________|   Parallel Port 1----> |____________|
+
+    ```
+
+- Two instances of 8259 PIC
+  - Primary 
+  - Secondary 
+  - Each has 8 interrupt lines 
+- Each controller can be configured through two I/O port
+  - One Command port and one data port 
+  - For primary controller, these ports are `0x20` (command) and `0x21` (data) 
+  - For secondary controller, these are `0xa0` (command) and `0xa1` (data)
+
+#### Implementation
+- The default configuration of the PICs is not usable because it send interrupts in the range 0-15 to the CPU
+- These numbers are already occupied by the CPU exceptions
+- The actual range doesn't matter as long as they dont' overlap
+- There is already a crate `pic8529`, so we will use that
+    ```toml
+    [dependencies]
+    pic8529 = "0.10.1"
+    ```
+- The main abstration is `ChainedPics` struct that represents the primary and secondary PIC layout 
+    ```rust
+    use pic8529::ChainedPics;
+    use spin;
+
+    pub const PIC_1_OFFSET: u8 = 32; // 32 - 39
+    pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8; // 40 - 47
+
+    pub static PICS: spin::Mutex<ChainedPics> = 
+            spin::Mutex::new(unsafe { 
+                ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
+            });
+    ```
+- We can now init our 8259 PIC in our `init` function
+    ```rust
+    pub fn init() {
+        gdt::init();
+        interrupts::init_idt();
+        unsafe { interrupts::PICS.lock().initialize() };
+    }
+    ```
+
+### Enabling Interrupts
+- Interrupts are disabled until now. This means CPU doesn not listen to the interrupt controller at all, so no interrupts can reach to the CPU. 
+
+    ```rust
+    pub fn init() {
+        gdt::init();
+        interrupts::init_idt();
+        unsafe { interrupts::PICS.lock().initialize() };
+        x86_64::instruction::interrupts::enable();
+    }
+    ```
+- The `interrupt::enable` function of the `x86_64` crate execute the special `sti` instructions (set interrupt) to enable the interrupts
+
+
+### Handling Timer Interrupts
+- Timer uses line 0 on the primary PIC
+- This mean it will arrive at the CPU as interrupt 32
+    ```rust
+    // in src/interrupts.rs
+
+    #[derive(Debug, Clone, Copy)]
+    #[repr(u8)]
+    pub enum InterruptIndex {
+        Timer = PIC_1_OFFSET
+    }
+
+    impl InterruptIndex {
+        fn as_u8(self) -> u8 {
+            self as u8
+        }
+
+        fn as_usize(self) -> usize {
+            usize::from(self.as_u8())
+        }
+    }
+    ```
+- The enum is C like enum so that we can directly specify the index for each variant 
+
+    ```rust
+    use oxid_os::print;
+
+    lazy_static! {
+        static ref IDT: InterruptDescriptorTable = {
+            let mut idt = InterruptDescriptorTable::new();
+            // set exception handler (existing)
+
+            idt[InterruptIndex::Timer.as_usize()]
+                .set_handler_fn(timer_interrupt_handler);
+        }
+        idt
+    };
+
+    extern "x86-interrupt" fn timer_interrupt_handler(
+        _stack_frame: InterruptStackFrame
+    ) {
+        print!(".");
+    }
+    ```
+
+- If you notice the structure of exception handler and interrupt handler is same. In some cases exception also push the error code
+
+#### End of Interrupt
+- PIC expects and explicit end of Interrupt (EOI) signal from our interrupt handler
+- This signal tells the controller that the interrupt was processed and the system is ready to recieve the next interrupt
+- PIC patiently waits for the EOI signal before sending the next one
+    ```rust
+    extern "x86-interrupt" fn timer_interrupt_handler (
+        _stack_frame: InterruptStackFrame
+    ) {
+        print!(".");
+        
+        unsafe {
+            // notice here we are using u8
+            PICS.lock()
+                .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        }
+    }
+    ```
+- The `notify_end_of_interrupt` figure out whether primary or secondary PIC sent the interrupt and then uses the `command` and `data` port to send the EOI signal to the respective controller
+- If the secondary PIC sent the Interrupt both PICs need to be notified because the secondary PIC is connected to the input line of the primary PIC
+  - Why ?
+  - When an interrupt comes from the secondary 8259 PIC, it physically travels through the primary PIC because the secondary is wired to one of the primary’s interrupt lines (IRQ2)
+  - As a result, both chips mark the interrupt as “in service” internally.
+  - Sending an EOI only to the secondary would clear the device-level interrupt, but the primary would still think IRQ2 is busy and would block future interrupts from the secondary
+  - Therefore, the kernel must send an EOI to both PICs to fully clear the interrupt path
+- We need to careful to use the correct interrupt vector number, o/w we could accidentally delete an important unsent interrupt or cause system to hang
