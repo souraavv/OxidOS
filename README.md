@@ -79,6 +79,9 @@
   - [Enabling Interrupts](#enabling-interrupts)
   - [Handling Timer Interrupts](#handling-timer-interrupts)
     - [End of Interrupt](#end-of-interrupt)
+  - [Deadlocks](#deadlocks)
+    - [Fixing the Deadlock](#fixing-the-deadlock)
+  - [The `hlt` instruction](#the-hlt-instruction)
 
 
 ## Rust Setup 
@@ -1196,7 +1199,9 @@ lazy_static! {
 - A simple way to send the data is to use the serial port
 - An old interface standard which is no longer found in modern computers.
 - It is easy to program and QEMU can redirect the bytes sent over serial to the host’s standard output or a file.
-- The chips implementing a serial interface are called UARTs
+- The chips implementing a serial interface are called UARTs (Universal Asynchronous Receiver-Transmitter)
+  - Transmit data serially 
+  - Recieve data serially
 - There are lots of UART models on x86
 - The common UARTs today are all compatible with the 16550 UART, so we will use that model for our testing framework.
 - We will use the uart_16550 crate to initialize the UART and send data over the serial port.
@@ -2121,8 +2126,8 @@ pub extern "C" fn _start() -> ! {
 - Most interrupts are programmable, which means they support different priority levels for interrupts
 - For example this allows timer interrupt a higher priority than keyboard interrupts to ensure proper timekeeping 
 
-    > [!IMPORTANT]  
-    > Unlike exception, hadware interrupts occurs asynchronously. This means they are completely independent from the executed code and can occur at any time. Thus we suddenly have form of concurrency in our kernel with all potential concurrency-related bugs
+> [!IMPORTANT]
+> Unlike exception, hadware interrupts occurs asynchronously. This means they are completely independent from the executed code and can occur at any time. Thus we suddenly have form of concurrency in our kernel with all potential concurrency-related bugs
 
 - Rust strict ownership model help us here because it forbids mutual global state. However deadlocks are still possible (we will see a way to fix towards the end of this chapter)
   
@@ -2270,3 +2275,76 @@ pub extern "C" fn _start() -> ! {
   - Sending an EOI only to the secondary would clear the device-level interrupt, but the primary would still think IRQ2 is busy and would block future interrupts from the secondary
   - Therefore, the kernel must send an EOI to both PICs to fully clear the interrupt path
 - We need to careful to use the correct interrupt vector number, o/w we could accidentally delete an important unsent interrupt or cause system to hang
+
+### Deadlocks
+- We now have concurrency in our kernel
+- The timer interrupt occurs asychronously, so they can interrupt our `_start` function at any time 
+- Fortunately Rust's ownership system prevents many types of concurrency-related bugs at compile time
+- One notable exception is Deadlock
+- Deadlock occurs when if a thread tries to acquire a lock that never become free. Thus a thread hangs, indefinitely
+
+
+| Timestep | _start action        | interrupt_handler action                        |
+|----------|----------------------|-------------------------------------------------|
+| 0        | calls println!       |                                                 |
+| 1        | print locks WRITER   |                                                 |
+| 2        |                      | interrupt occurs, handler begins to run         |
+| 3        |                      | calls println!                                  |
+| 4        |                      | print tries to lock WRITER (already locked)     |
+| 5        |                      | print tries to lock WRITER (already locked)     |
+| …        |                      | …                                               |
+| never    | unlock WRITER        |                                                 |
+
+
+#### Fixing the Deadlock 
+
+- To avoid this deadlock, we can disable interrupts as long as the `Mutex` is locked:
+    ```rust
+    // src/vga_buffer.rs
+
+    #[doc(hidden)]
+    pub fn _print(args: fmt::Arguments) {
+        use core::fmt::Write;
+        use x86_64::instructions::interrupts;
+
+        interrupts::without_interrupts(|| {
+            WRITER.lock().write_fmt(args).unwrap();
+        });
+    }
+    ```
+- The `without_interrupts` function take a closure and exercise it in an interrupt-free environment 
+- Similary we can do with other printing functions
+    ```rust
+    // src/serial.rs
+
+    #[doc(hidden)]
+    pub fn _print(args: ::core::fmt::Arguments) {
+        use core::fmt::Write;
+        use x86_64::instructions::interrupts; 
+
+        interrupts::without_interrupts(|| { 
+            SERIAL1
+                .lock()
+                .write_fmt(args)
+                .expect("Printing to serial failed");
+        });
+    }
+    ```
+- But note that disabling interrupt is not a solution - we are increasing the latency to serve the interrupt
+- Therefore, interrupt should only be disable for very small time
+
+### The `hlt` instruction
+- Till now we have used `loop` at the end of `_start` method
+- This causes CPU to spin endlessly - inefficient
+- What we want is to halt the CPU until the next interrupt arrives
+- This allows CPU to enter a sleep state in which it consumes much less energy 
+- The `hlt` instruction does exactly that
+    ```rust
+    pub fn hlt_loop() -> ! {
+        loop {
+            x86_64::instruction::hlt();
+        }
+    }
+    ```
+- The `instruction::hlt()` is a think wrapper around assembly instructions
+- We can now use `hlt_loop` 
