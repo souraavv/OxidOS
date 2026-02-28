@@ -98,6 +98,9 @@
   - [Paging on `x86_64`](#paging-on-x86_64)
     - [Page Format](#page-format)
     - [The Translation Look Aside Buffer](#the-translation-look-aside-buffer)
+  - [Implementation](#implementation-2)
+    - [Page Fault](#page-fault)
+    - [Accessing the Page Tables](#accessing-the-page-tables)
 
 
 ## Rust Setup 
@@ -2632,3 +2635,61 @@ pub extern "C" fn _start() -> ! {
 - The TLB can also be flushed completely by reloading `CR3` register
 - It is important (because now we are writing our own OS) - To flush the TLB on each page table modification because otherwise, the CPU might keep using the old translation, which can lead to the non-deterministic bugs that are hard to figure out
 
+### Implementation
+- Our kernel already runs on paging
+- The booloader we added has already setup the 4-level  paging hierarchy
+  - That maps every page of our kernel to the physical frame
+  - The bootloader does this because paging is mandatory in 64-bit mode on `x86_64`
+- this mean that every memory address we use in our kernel was the virtual address
+  - Accessing the VGA buffer at address `0xb8000` only worked because the booloader identity mapped that memory page, which means it mapps the virtual page `0xb8000` to the physical frame `0xb8000`
+- Paging makes our kernel already relatively safe
+  - Since every memory access that is out bound causes the page fault exception 
+- The bootloader even sets the correct access permissions for each page, which means that only the page containing codes are executable and only data pages are writable
+
+#### Page Fault
+- Writing handler
+    ```rust
+    lazy_static! {
+
+        static ref IDT: InterruptDescriptorTable = {
+            let mut id = InterruptDescriptorTable::new();
+
+
+            idt.page_fault.set_handler_fn(page_fault_handler);
+            idt
+        };
+    }
+
+    use x86_64::structures::idt::PageFaultErrorCode;
+    use crate::hlt_loop;
+
+    extern "x86-interrupt" page_fault_handler(
+        stack_frame: InterruptStackFrame,
+        error_code: PageFaultErrorCode,) 
+    {
+        use x86_64::registers::control::Cr2;
+
+        println!("EXCEPTION: PAGE FAULT");
+        println!("Accessed Address: {:?}", Cr2::read());
+        println!("Error Code: {:?}", error_code);
+        println!("{:#?}", stack_frame);
+
+        hlt_loop();
+    }
+
+    ```
+
+#### Accessing the Page Tables
+- The `Cr3::read` function of the `x86_64` returns the currently active level 4 page table from the `CR3` register.
+    ```rust
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _start() -> ! {
+        use x86_64::registers::control::Cr3;
+        let (level_4_page_table, _) = Cr3::read();
+        println!("Level 4 page table at: {:?}", level_4_page_table.start_address());
+    }
+    ```
+
+- Accessing physical memory directly is not possible when paging is active, since programs could easily circumvent memory protection and access the memory of other programs otherwise
+- So the only way to access the table is through some virtual page that is mapped to the physical frame at address 0x1000
+- This problem of creating mappings for page table frames is a general problem since the kernel needs to access the page tables regularly 
