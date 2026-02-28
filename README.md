@@ -2678,6 +2678,8 @@ pub extern "C" fn _start() -> ! {
     }
 
     ```
+    
+    ![Page Fault](./images/page-fault.png)
 
 #### Accessing the Page Tables
 - The `Cr3::read` function of the `x86_64` returns the currently active level 4 page table from the `CR3` register.
