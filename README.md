@@ -101,6 +101,11 @@
   - [Implementation](#implementation-2)
     - [Page Fault](#page-fault)
     - [Accessing the Page Tables](#accessing-the-page-tables)
+- [Chapter 9. Paging Implementation](#chapter-9-paging-implementation)
+  - [Accessing Page Table](#accessing-page-table)
+    - [Identity Mapping](#identity-mapping)
+    - [Map at a Fixed Offset](#map-at-a-fixed-offset)
+    - [Map the Complete Physical Memory](#map-the-complete-physical-memory)
 
 
 ## Rust Setup 
@@ -2695,3 +2700,56 @@ pub extern "C" fn _start() -> ! {
 - Accessing physical memory directly is not possible when paging is active, since programs could easily circumvent memory protection and access the memory of other programs otherwise
 - So the only way to access the table is through some virtual page that is mapped to the physical frame at address 0x1000
 - This problem of creating mappings for page table frames is a general problem since the kernel needs to access the page tables regularly 
+
+
+## Chapter 9. Paging Implementation
+- How to access the page table because they are stored on the physical memory and our kernel already runs on the virtual addresses (paging and its protections are enabled)
+- We will understand how we can make kernel access the page table frames
+- In this chapter 
+  - we will implement a function that traverses the page table hierarchy in order to translate virtual to physical addresses
+  - Finally, we learn how to create new mappings in the page tables and 
+  - how to find unused memory frames for creating new page tables.
+
+### Accessing Page Table
+- Lets take this example
+    ![L4 Intel x86_64 page table structure](./images/pageTable-l4.png)
+- The important thing is 
+  - Each page table entry stores the physical address of the next table
+  - This avoids the need to run a translation for these addresses too, because else it will become endless loop
+- Since our OS already running on virtual addresses - we can access virtual addresses and not physical addresses
+- When you want to access the physical address, we can only do so through some virtual address that maps it
+- So in order to access Page Table Frame, we need to map some virtual pages to them
+- There are different ways to create this mapping that all allow us to access page table frames.
+
+
+#### Identity Mapping
+- A simple solution is to identity map all page tables:
+   ![Identity Map](./images/identity-map.png)
+- This way, the physical addresses of page tables are also valid virtual addresses so that we can easily access the page tables of all levels starting from the CR3 register
+  - So if PA are {PA1, PA2, PA3.., ..} then VA = {VA1=PA1, VA2=PA2, ...}
+  - Note that in this case we are keeping the VA size = actual PA
+- However, it clutters the virtual address space and makes it more difficult to find continuous memory regions of larger sizes
+
+
+#### Map at a Fixed Offset
+- To avoid the problem of cluttering the virtual address space, we can use a separate memory region for page table mappings.
+- VA has no limitation with the Actual PA, so
+  - By using the virtual memory in the range $10$ TiB..($10$ TiB + physical memory size) exclusively for page table mappings, we avoid the collision problems of the identity mapping. 
+- This approach still has the disadvantage that we need to create a new mapping whenever we create a new page table
+- Also, it does not allow accessing page tables of other address spaces, which would be useful when creating a new process.
+
+#### Map the Complete Physical Memory
+- We can solve these problems by mapping the complete physical memory instead of only page table frames:
+- This approach allows our kernel to access arbitrary physical memory, including page table frames of other address spaces
+- The reserved virtual memory range has the same size as before, with the difference that it no longer contains unmapped pages
+- The disadvantage of this approach is that additional page tables are needed for storing the mapping of the physical memory
+- These page tables need to be stored somewhere, so they use up a part of physical memory, which can be a problem on devices with a small amount of memory.
+- On `x86_64`, however, we can use huge pages with a size of $2$ MiB for the mapping,
+- This way, mapping $32$ GiB ($2^{35}$) of physical memory only requires $132$ KiB for page tables since only one level $3$ page table and $32$ - level $2$ tables are needed
+  - With huge page we omit L1, so we have L2 points to the $2$MiB page
+  - L2 table has $512$ entires.
+    - So total addressable space it maps = $512 \times 2$MiB = $1$GiB
+  - Since we want to map $32$GiB of physical memory we would required $32$ L2 page tables
+  - Similarly L3 has $512$ entires, each entry point to L2 page table which inturns point to $1$GiB
+    - So L3 can easily point to $512$GiB - Thus one is enough
+- Huge pages are also more cache efficient since they use fewer entries in the translation lookaside buffer (TLB).
