@@ -17,8 +17,7 @@ pub extern "C" fn _start() -> ! {
     test_main();
 
     println!("It did not crash!");
-
-    loop {}
+    oxid_os::hlt_loop();
 }
 
 /// This function is called on panic.
@@ -26,7 +25,7 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("{}", info);
-    loop {}
+    oxid_os::hlt_loop();
 }
 
 #[cfg(test)]

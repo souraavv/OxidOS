@@ -2462,6 +2462,9 @@ pub extern "C" fn _start() -> ! {
 - The `KeyEvent` contains the key which caused the event and whether it was a **press or release event**.
 - To interpret this key event, we pass it to the `process_keyevent` method, which translates the key event to a character, if possible.
 
+    ![Keyworking](./images/keyboard_working.png)
+
+
 ### Summary
 - We learned how to enable external interrupts
 - We learned about 8259 PIC
