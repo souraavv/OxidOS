@@ -86,6 +86,16 @@
     - [Reading the ScanCodes](#reading-the-scancodes)
     - [Interpretting the scan code](#interpretting-the-scan-code)
   - [Summary](#summary-1)
+- [Chapter 8. Introduction to Paging](#chapter-8-introduction-to-paging)
+  - [Memory Protection](#memory-protection)
+  - [Segmentation](#segmentation)
+    - [Virtual Memory](#virtual-memory)
+    - [Fragmentation](#fragmentation)
+  - [Paging](#paging)
+    - [Hidden Fragmentation](#hidden-fragmentation)
+    - [Page Table](#page-table)
+    - [Multi-level Page Table](#multi-level-page-table)
+  - [Paging on `x86_64`](#paging-on-x86_64)
 
 
 ## Rust Setup 
@@ -2472,3 +2482,102 @@ pub extern "C" fn _start() -> ! {
 - We learned the `htl` instruction
 - We implement the interrupt handler for the keyboard interrupt
 - Now we have basic fundamental building block for creating a small shell or simple games
+
+
+## Chapter 8. Introduction to Paging
+- Memory management scheme
+- We will understand how paging solves the fragmentation issue 
+- We will also explore the layout of multilevel page table on `x86_64` architecture
+
+### Memory Protection
+- One main task of OS is to isolate the programs from each other
+- To achieve this OS uses hardware functionality to ensure that memory areas of one process are not accessible by other processes
+- On x86, the hardware supports two different approaches for the memory protection:
+  - segmentation
+  - paging
+
+### Segmentation
+- Old CPU were 16-bit, so at max addressable memory can be 64KiB
+  - The trick intel used was segmentation
+  - Instead of one address, the CPU uses two pieces - a segment and offset
+  - The physical address was computed using `segment_base + offset` 
+  - In real mode, the segment base was stored in segmentation register and shifted 
+- The segment register is chosen automatically by the CPU depending on the kind of memory access:
+  - For fetching instruction, the code segment `cs` is used
+  - And for stack operation (push/pop), the stack segment `ss` is used
+- Early segmentation was fundamently unsafe 
+  - No access permissions, no bound checks, no isolation 
+- Protection Mode - Segmentation becomes structured
+  - With protected mode, segment register stopped holding raw addresses
+  - Instead they hold the selector, which is an index into the descriptor table 
+  - GDT: Global Descriptor Table - system level
+  - LDT: Local Descriptor Table  - perprocess
+- Each segment descriptor contains
+  - base address
+  - segment limit (size)
+  - access right (read/write/execute, privilege level)
+- On every memory access:
+  - CPU uses the selector to find the descriptor 
+  - Checks permission and bounds
+  - Adds base + offset to form the linear address
+    - This is where process isolation happens : different process get different GDT/LDT entries, so the same offset refers to different physical memory
+    - This is what virtual memory is
+    - CPU translate virtual address to real memory address
+  - Indirection + protection 
+- Modern we use paging 
+
+#### Virtual Memory 
+- The idea behind virtual memory is to abstract away the the memory addresses from the underlying physical storage device 
+- Instead directly accessing the storage device, the translation step is performed first
+- For segmentation the translation step is to add the offset address of the active segment
+- Advantage: Program can be placed arbitrary physical memory location 
+
+#### Fragmentation
+- There is problem with segmentation
+- One way to combat this fragmentation is to pause execution, move the used part of the memory closer together, update the translation, and resume the execution 
+  - But doing so will downgrade the performance - will make programs unresponsive
+
+### Paging
+- The idea is to divide both the virtual and physical memory space into small, fixed-size blocks
+- The blocks are called as pages (virtual) and frame (physical)
+- Each page is mapped to a frame individually, so that continuous virtual memory region can be mapped to non-continuous physical frames
+
+#### Hidden Fragmentation
+- Internal fragmentation - but better than external fragmentation 
+- It wastes memory on avg (half a page per memory region)
+
+#### Page Table
+- The mapping of pages to frame need to store somewhere
+- Unlike in segmentation we used segmentation register, here we can't do that
+- We will use page table
+- Each program instance has its own page table 
+- A pointer to the currently active table is stored in CPU register
+  - On `x86`, this register is called `CR3` 
+- It is the job of Operating system to load this register with the pointer to the correct page table before running each program instance
+- On each memory access, the CPU reads the table pointer from `CR3` register and lookup the mapped frame for the accessed page in the table
+- To speedup the translation CPU architecture have a special cache that remembers the results of the last translations
+
+#### Multi-level Page Table
+- The simple page table we saw has problems in larger address space: they waste memory
+- For example - imagine a program that uses the four virual address 0, 1_000_000, 1_000_050, 1_000_010
+- It only need 4 frames but the page table has over a million entries 
+- To reduce this wastage we can use the two-level page table 
+
+### Paging on `x86_64`
+- The `x86_64` architecture uses four level of page table 
+- Page size is 4KiB 
+- Each page table independent of the level, has a fixed size of 512 entries (2^9)
+- Each entry has 8 byte, so table size is 8 * 512 = 4KiB large thus fits directly into the one page
+- The page table index for each level is derived directly from the virtual address
+  - Since page size is 4KiB = 2^2 * 2^10 = 2^12, so if our memory is byte addressable we need 12 bytes
+    - Lets say first (0 - 11): 12 bytes for the page offset
+  - Now we have Level 1 index : There are 512 entires so we need 2^9, 9 bits
+  - Same for Level 2, Level 3, Level 4
+- Recent Ice Lake Intel CPUs supports 5 level of page table to extend virtual memory addres from 48-bit to 57-bit 
+- The permission for page table are `r` only
+  - Hardware enforces these permission and any violation raises Exception
+- We start from Level 4 -> Level 3 -> Level 2 -> Level 1 -> Actual Frame
+  - So there is one Level 4 table
+  - 512 Level 3
+  - 512 * 512 Level 2
+  - 512 * 512 * 512 Level 1
