@@ -96,6 +96,8 @@
     - [Page Table](#page-table)
     - [Multi-level Page Table](#multi-level-page-table)
   - [Paging on `x86_64`](#paging-on-x86_64)
+    - [Page Format](#page-format)
+    - [The Translation Look Aside Buffer](#the-translation-look-aside-buffer)
 
 
 ## Rust Setup 
@@ -2581,3 +2583,52 @@ pub extern "C" fn _start() -> ! {
   - 512 Level 3
   - 512 * 512 Level 2
   - 512 * 512 * 512 Level 1
+
+#### Page Format 
+- Page table on x86 are basically an array of 512 entires
+    ```rust
+    #[repr(align(4096))]
+    pub struct PageTable {
+        entries: [PageTableEntry; 512],
+    }
+    ```
+- Each entry is 8-byte (64 bits) = 2^12 (4KiB) / 2^9 = 2^3 size of each entry
+
+| Bit(s) | Name                     | Meaning                                                                 |
+|--------|--------------------------|-------------------------------------------------------------------------|
+| 0      | present                  | The page is currently in memory                                         |
+| 1      | writable                 | Writing to this page is allowed                                        |
+| 2      | user accessible          | If not set, only kernel-mode code can access this page                 |
+| 3      | write-through caching    | Writes go directly to memory                                           |
+| 4      | disable cache            | No cache is used for this page                                         |
+| 5      | accessed                 | Set by the CPU when this page is accessed                              |
+| 6      | dirty                    | Set by the CPU when a write to this page occurs                        |
+| 7      | huge page / null         | Must be 0 in P1 and P4; creates 1 GiB page in P3, 2 MiB page in P2     |
+| 8      | global                   | Page not flushed on address-space switch (CR4.PGE must be set)        |
+| 9–11   | available                | Freely usable by the OS                                                |
+| 12–51  | physical address         | Page-aligned 52-bit physical address of frame or next page table      |
+| 52–62  | available                | Freely usable by the OS                                                |
+| 63     | no execute               | Forbids code execution (EFER.NXE must be set)                          |
+
+
+- The `present` flag differenciate mapped pages from the unmapped ones. It can be used to temporarily swap out pages to disk when the main memory become full 
+  - Page fault occurs if present = 0
+- The `accessed` and `dirty` flag is set by the CPU when a read or write to the page occurs
+  - Used by OS at the time of swap
+- The `write-through` caching and `disable cache` flags control the cache for each individual page
+- The `user accessible` flag makes a page available to userspace code, otherwise only kernel can access
+- The `huge page` flag allows the creation of pages of larger size by letting the entries of the level 2 or level 3 page tables directly points to the mapped frame
+  - With this bit set the page size increase from 512 to either 2MiB or 1GiB (512 * 2MiB)
+  - The advantages of large pages is that fewer lines of the translation cache and fewer page tables are needed
+
+#### The Translation Look Aside Buffer
+- 4-leve page table makes the translation expensive
+  - Each access = 4 memory access
+- To improve the performance, the x86_64 architecture caches the last few tranlations in the so-called TLB (translation lookaside buffer)
+- This allow skipping if cache is available
+- Unlike CPU cache, this requires OS intervention to update the TLB whenever page table is modified
+  - so TLB is not fully transparent
+- Kernel uses a special CPU instruction called `invlpg` (invalidate page) that removes the translation for the specified page from the TLB, so that it is loaded again from the page table on the next access
+- The TLB can also be flushed completely by reloading `CR3` register
+- It is important (because now we are writing our own OS) - To flush the TLB on each page table modification because otherwise, the CPU might keep using the old translation, which can lead to the non-deterministic bugs that are hard to figure out
+
